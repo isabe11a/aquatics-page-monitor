@@ -83,6 +83,68 @@ def _find_heading_anywhere(page, title):
     log(f"heading NOT found: {title}")
     return None
 
+def parse_aria_grid(scope):
+    """
+    Parse a CivicRec-style div grid that uses WAI-ARIA roles instead of <table>.
+    Looks for [role="columnheader"], [role="row"], [role="cell"].
+    Returns a list of {"dates":[...], "times":[...]}.
+    """
+    sessions = []
+
+    # Headers → figure out column indices
+    headers = scope.locator('[role="columnheader"]')
+    hcount = headers.count()
+    dates_idx = times_idx = None
+    header_texts = []
+    for i in range(hcount):
+        txt = (headers.nth(i).inner_text() or "").strip()
+        header_texts.append(txt)
+        low = txt.lower()
+        if dates_idx is None and "date" in low:
+            dates_idx = i
+        if times_idx is None and ("time" in low or "times" in low):
+            times_idx = i
+
+    # Hard fallback to common CivicRec positions if headers are odd/missing
+    if dates_idx is None:
+        dates_idx = 4  # SESSION|LOCATION|AGE|DAYS|DATES|TIMES|...
+    if times_idx is None:
+        times_idx = 5
+
+    # Data rows (skip header-like rows that contain columnheaders)
+    rows = scope.locator('[role="row"]')
+    rcount = rows.count()
+    for r in range(rcount):
+        row = rows.nth(r)
+        # Skip header row(s)
+        if row.locator('[role="columnheader"]').count() > 0:
+            continue
+        cells = row.locator('[role="cell"]')
+        ccount = cells.count()
+        if ccount == 0:
+            continue
+
+        def safe_cell(idx):
+            if idx is None or idx >= ccount:
+                return ""
+            try:
+                return (cells.nth(idx).inner_text() or "").strip()
+            except Exception:
+                return ""
+
+        dates_txt = safe_cell(dates_idx)
+        times_txt = safe_cell(times_idx)
+
+        # Run the same regex extraction on the concatenated text
+        d_dates, d_times = extract_dates_times(f"{dates_txt} {times_txt}")
+        if d_dates or d_times:
+            sessions.append({
+                "dates": d_dates or ["n/a"],
+                "times": d_times or ["n/a"],
+            })
+
+    return sessions
+
 def list_sessions_for_item(page, title):
     """
     Find the heading containing `title`, then parse the first sessions table
@@ -206,6 +268,14 @@ def list_sessions_for_item(page, title):
         if parsed:
             parsed.sort(key=lambda s: (";".join(s["dates"]), ";".join(s["times"])))
             return parsed
+    # If no <table> in same doc, try an ARIA grid nearby in the same doc
+    grid_scope = heading.locator('xpath=following::*[@role="grid" or @role="table"][1]').first
+    if grid_scope.count() > 0:
+        parsed = parse_aria_grid(grid_scope)
+        if parsed:
+            parsed.sort(key=lambda s: (";".join(s["dates"]), ";".join(s["times"])))
+            return parsed
+
 
     # ---------- 2) Next iframe after heading -> first table inside ----------
     next_iframe = heading.locator("xpath=following::iframe[1]").first
@@ -218,14 +288,23 @@ def list_sessions_for_item(page, title):
             log(f"warn: content_frame failed: {e}")
             fr = None
         if fr:
+            # Try a real table first
             tbl = fr.locator("table:has(th:has-text('Dates')), table:has(th:has-text('Time'))").first
             if tbl.count() == 0:
                 tbl = fr.locator("table").first
+
+            parsed = []
             if tbl.count() > 0:
-                parsed = parse_table_safely(tbl)
-                if parsed:
-                    parsed.sort(key=lambda s: (";".join(s["dates"]), ";".join(s["times"])))
-                    return parsed
+                parsed = parse_table_safely(tbl)  # your safe table parser
+
+            # If no table rows parsed, try ARIA grid
+            if not parsed:
+                parsed = parse_aria_grid(fr)
+
+            if parsed:
+                parsed.sort(key=lambda s: (";".join(s["dates"]), ";".join(s["times"])))
+                return parsed
+
 
     # ---------- 3) Last resort: nearby text ----------
     try:
