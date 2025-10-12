@@ -1,10 +1,10 @@
 name: Aquatics Page Monitor
 
 on:
-  #schedule:
-  #  - cron: "0 14 * * *"   # ~7:00 AM PT most of the year, 6:00 AM in winter
   schedule:
-    - cron: "*/5 * * * *"   # every 5 minutes while testing; switch to daily later
+    - cron: "0 14 * * *"   # ~7:00 AM PT most of the year, 6:00 AM in winter
+  #schedule:
+  #  - cron: "*/5 * * * *"   # every 5 minutes while testing; switch to daily later
   workflow_dispatch:
 
 # Needed so the workflow can push baseline.json
@@ -52,7 +52,7 @@ jobs:
       - name: Commit updated baseline
         if: always()
         run: |
-          git config user.name "aquatics-bot"
+          git config user.name "${{ secrets.GIT_USER_NAME }}"
           git config user.email "${{ secrets.GIT_USER_EMAIL }}"
           git add baseline.json
           git commit -m "Update baseline [skip ci]" || echo "No changes"
