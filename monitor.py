@@ -145,25 +145,75 @@ def parse_aria_grid(scope):
 
     return sessions
 
+def _wait_for_sessions_region(page, heading, timeout=4000):
+    """
+    After clicking the heading, wait for a sessions region to appear:
+    - a real <table>,
+    - an ARIA grid/table,
+    - or an <iframe> that likely contains one.
+    Returns a dict of locators we can try in order.
+    """
+    # give the DOM a moment to react
+    page.wait_for_timeout(200)
+
+    region = {
+        "tables_same": heading.locator('xpath=following::*[self::table][1]'),
+        "grid_same":   heading.locator('xpath=following::*[@role="grid" or @role="table"][1]'),
+        "iframe_same": heading.locator('xpath=following::iframe[1]'),
+    }
+
+    # Wait, but don’t die if nothing appears quickly
+    try:
+        page.wait_for_timeout(200)
+        if region["tables_same"].count() == 0 and region["grid_same"].count() == 0 and region["iframe_same"].count() == 0:
+            page.wait_for_timeout(timeout)
+    except Exception:
+        pass
+    return region
+
+def _all_candidate_scopes(page, heading):
+    """
+    Build a list of candidate scopes to search for sessions, in priority order:
+    - first few following tables in same doc,
+    - first few ARIA grids in same doc,
+    - first few iframes following the heading (we’ll parse inside).
+    """
+    scopes = []
+    # up to three following tables/grids/iframes (bounded breadth)
+    tables = heading.locator('xpath=following::table[position()<=3]')
+    grids  = heading.locator('xpath=following::*[@role="grid" or @role="table"][position()<=3]')
+    iframes = heading.locator('xpath=following::iframe[position()<=3]')
+
+    scopes.append(("tables_same", tables))
+    scopes.append(("grids_same", grids))
+    scopes.append(("iframes", iframes))
+    return scopes
+
 def list_sessions_for_item(page, title):
     """
-    Find the heading containing `title`, then parse the first sessions table
-    that follows it (or the first table inside the next iframe). Dates/Times are
-    extracted by header index when possible, with safe fallbacks.
+    Click the heading for `title`, then parse sessions from:
+    - nearest tables,
+    - nearest ARIA grids,
+    - or the first few following iframes (table/grid inside).
+    Returns a list of {"dates":[...], "times":[...]} (could be empty).
     """
     sessions = []
     heading = _find_heading_anywhere(page, title)
     if not heading:
-        return sessions  # treat as not listed
+        return sessions  # not listed
 
-    # Expand if collapsible
+    # Always click to expand (some pages don’t set aria-expanded)
     try:
-        ae = heading.get_attribute("aria-expanded")
-        if ae == "false":
-            heading.click(timeout=2000)
-            page.wait_for_timeout(300)
+        heading.click(timeout=2500)
     except Exception:
         pass
+    page.wait_for_timeout(350)
+
+    # Wait for something to render near the heading (table/grid/iframe)
+    _ = _wait_for_sessions_region(page, heading)
+
+    # Build candidate scopes (bounded search)
+    scopes = _all_candidate_scopes(page, heading)
 
     def parse_table_safely(tbl):
         out = []
@@ -185,128 +235,158 @@ def list_sessions_for_item(page, title):
             if headers:
                 log(f"header cells: {headers}")
 
-            # ---- Determine Dates / Times column indices ----
-            dates_col = times_col = None
-            if head_count > 0:
-                for i, h in enumerate([h.lower() for h in headers]):
-                    if "date" in h and dates_col is None:
-                        dates_col = i
-                    if ("time" in h or "times" in h) and times_col is None:
-                        times_col = i
-            else:
-                # First row as header fallback
-                first = tbl.locator("tr").first.locator("th,td")
-                first_n = first.count()
-                for i in range(first_n):
-                    h = (first.nth(i).inner_text() or "").strip().lower()
-                    if "date" in h and dates_col is None:
-                        dates_col = i
-                    if ("time" in h or "times" in h) and times_col is None:
-                        times_col = i
+    def parse_table_by_headers(tbl):
+    out = []
+    # ensure rendered
+    try:
+        tbl.wait_for(state="visible", timeout=5000)
+    except Exception:
+        pass
 
-            # Hard fallback to common CivicRec positions (0-based)
-            if dates_col is None:
-                dates_col = 4
-                log("dates_col not found by header; falling back to index 4")
-            if times_col is None:
-                times_col = 5
-                log("times_col not found by header; falling back to index 5")
+    # --- log headers we actually see ---
+    try:
+        ths_dbg = [ (tbl.locator("thead tr th").nth(i).inner_text() or "").strip()
+                    for i in range(tbl.locator("thead tr th").count()) ]
+        log(f"header cells: {ths_dbg}")
+    except Exception:
+        pass
 
-            # ---- Get data rows robustly ----
-            rows = tbl.locator("tbody tr")
-            n = rows.count()
-            if n == 0:
-                # Any TR without TH (skip header rows)
-                rows = tbl.locator("tr").filter(has_not=tbl.locator("th"))
-                n = rows.count()
+    # find header indices
+    ths = tbl.locator("thead tr th")
+    dates_col = times_col = None
+    if ths.count() > 0:
+        for i in range(ths.count()):
+            h = (ths.nth(i).inner_text() or "").strip().lower()
+            if "date" in h and dates_col is None:
+                dates_col = i
+            if ("time" in h or "times" in h) and times_col is None:
+                times_col = i
+    else:
+        # fallback: use first row as header
+        first = tbl.locator("tr").first.locator("th,td")
+        for i in range(first.count()):
+            h = (first.nth(i).inner_text() or "").strip().lower()
+            if "date" in h and dates_col is None:
+                dates_col = i
+            if ("time" in h or "times" in h) and times_col is None:
+                times_col = i
 
-            if n == 0:
-                log("no data rows found in table")
-                return out
+    # --- hard fallback to CivicRec defaults if still unknown ---
+    # CivicRec sessions table is commonly:
+    # SESSION | LOCATION | AGE | DAYS | DATES | TIMES | FEES | AVAILABILITY | ADD TO CART
+    if dates_col is None:
+        dates_col = 4
+        log("dates_col not found by header; falling back to index 4")
+    if times_col is None:
+        times_col = 5
+        log("times_col not found by header; falling back to index 5")
 
-            # helper: read a cell safely
-            def cell_text(row_loc, col_idx):
-                if col_idx is None:
-                    return ""
-                # nth-child is 1-based
-                try:
-                    return (row_loc.locator(f"td:nth-child({col_idx+1})").inner_text() or "").strip()
-                except Exception:
-                    return ""
+    # rows
+    rows = tbl.locator("tbody tr")
+    if rows.count() == 0:
+        # no <tbody> -> use all rows after first
+        all_rows = tbl.locator("tr")
+        if all_rows.count() > 1:
+            rows = all_rows.nth(1)
+        else:
+            rows = tbl.locator("tr")  # last ditch
 
-            # iterate rows
-            for i in range(n):
-                r = rows.nth(i)
-                try:
-                    dates_txt = cell_text(r, dates_col)
-                    times_txt = cell_text(r, times_col)
-                    if not dates_txt and not times_txt:
-                        # fallback: whole row text
-                        row_all = (r.inner_text() or "").strip()
-                        d_dates, d_times = extract_dates_times(row_all)
-                    else:
-                        d_dates, d_times = extract_dates_times(f"{dates_txt} {times_txt}")
-                    # Only append if something real was found
-                    if d_dates or d_times:
-                        out.append({
-                            "dates": d_dates or ["n/a"],
-                            "times": d_times or ["n/a"],
-                        })
-                except Exception as e:
-                    log(f"row parse error: {e}")
-                    continue
+    # debug: first row text
+    try:
+        if rows.count() > 0:
+            log(f"first data row: {(rows.nth(0).inner_text() or '').strip()[:200]}")
+    except Exception:
+        pass
 
-        except Exception as e:
-            log(f"parse_table_safely error: {e}")
-        return out
+    def cell_text(row, col_idx):
+        if col_idx is None:
+            return ""
+        return (row.locator(f"td:nth-child({col_idx+1})").inner_text() or "").strip()
 
-    # ---------- 1) Next table in same document ----------
-    next_table = heading.locator("xpath=following::table[1]").first
-    if next_table.count() > 0 and next_table.is_visible():
-        log(f"next table found for {title} (same doc)")
-        parsed = parse_table_safely(next_table)
-        if parsed:
-            parsed.sort(key=lambda s: (";".join(s["dates"]), ";".join(s["times"])))
-            return parsed
-    # If no <table> in same doc, try an ARIA grid nearby in the same doc
-    grid_scope = heading.locator('xpath=following::*[@role="grid" or @role="table"][1]').first
-    if grid_scope.count() > 0:
-        parsed = parse_aria_grid(grid_scope)
-        if parsed:
-            parsed.sort(key=lambda s: (";".join(s["dates"]), ";".join(s["times"])))
-            return parsed
+    # iterate
+    count = rows.count() if hasattr(rows, "count") else 0
+    for i in range(count):
+        r = rows.nth(i)
+        dates_txt = cell_text(r, dates_col)
+        times_txt = cell_text(r, times_col)
+        d_dates, d_times = extract_dates_times(f"{dates_txt} {times_txt}")
+        out.append({
+            "dates": d_dates or ["n/a"],
+            "times": d_times or ["n/a"],
+        })
+    return out
 
+    # 1) Try plain HTML tables in the same document
+    for label, loc in scopes:
+        if label != "tables_same":
+            continue
+        count = loc.count()
+        for i in range(min(3, count)):
+            tbl = loc.nth(i)
+            if tbl.count() == 0 or not tbl.is_visible():
+                continue
+            parsed = parse_table_safely(tbl) if "parse_table_safely" in globals() else parse_table_by_headers(tbl)
+            if parsed:
+                sessions.extend(parsed)
+        if sessions:
+            sessions.sort(key=lambda s: (";".join(s["dates"]), ";".join(s["times"])))
+            return sessions
 
-    # ---------- 2) Next iframe after heading -> first table inside ----------
-    next_iframe = heading.locator("xpath=following::iframe[1]").first
-    if next_iframe.count() > 0:
-        log(f"iframe found for {title}")
-        try:
-            handle = next_iframe.element_handle()
-            fr = handle.content_frame() if handle else None
-        except Exception as e:
-            log(f"warn: content_frame failed: {e}")
-            fr = None
-        if fr:
-            # Try a real table first
+    # 2) Try ARIA grids in the same document
+    for label, loc in scopes:
+        if label != "grids_same":
+            continue
+        count = loc.count()
+        for i in range(min(3, count)):
+            grid = loc.nth(i)
+            if grid.count() == 0 or not grid.is_visible():
+                continue
+            parsed = parse_aria_grid(grid)
+            if parsed:
+                sessions.extend(parsed)
+        if sessions:
+            sessions.sort(key=lambda s: (";".join(s["dates"]), ";".join(s["times"])))
+            return sessions
+
+    # 3) Try iframes that follow the heading
+    for label, loc in scopes:
+        if label != "iframes":
+            continue
+        count = loc.count()
+        for i in range(min(3, count)):
+            iframe_el = loc.nth(i)
+            if iframe_el.count() == 0:
+                continue
+            try:
+                handle = iframe_el.element_handle()
+                fr = handle.content_frame() if handle else None
+            except Exception:
+                fr = None
+            if not fr:
+                continue
+
+            # Prefer table in the frame
             tbl = fr.locator("table:has(th:has-text('Dates')), table:has(th:has-text('Time'))").first
             if tbl.count() == 0:
                 tbl = fr.locator("table").first
 
             parsed = []
             if tbl.count() > 0:
-                parsed = parse_table_safely(tbl)  # your safe table parser
-
-            # If no table rows parsed, try ARIA grid
+                parsed = parse_table_safely(tbl) if "parse_table_safely" in globals() else parse_table_by_headers(tbl)
             if not parsed:
-                parsed = parse_aria_grid(fr)
+                # Try ARIA grid inside the frame
+                grid = fr.locator('[role="grid"], [role="table"]').first
+                if grid.count() > 0:
+                    parsed = parse_aria_grid(grid)
 
             if parsed:
-                parsed.sort(key=lambda s: (";".join(s["dates"]), ";".join(s["times"])))
-                return parsed
+                sessions.extend(parsed)
 
+        if sessions:
+            sessions.sort(key=lambda s: (";".join(s["dates"]), ";".join(s["times"])))
+            return sessions
 
-    # ---------- 3) Last resort: nearby text ----------
+    # 4) Last resort: nearby text block
     try:
         block = heading.locator("xpath=following::*[self::div or self::section][1]")
         txt = block.inner_text()
@@ -315,10 +395,8 @@ def list_sessions_for_item(page, title):
     d, t = extract_dates_times(txt)
     if d or t:
         sessions.append({"dates": d or ["n/a"], "times": t or ["n/a"]})
-    # If we found nothing at all, return [] so _has_real_sessions treats it as absent
     sessions.sort(key=lambda s: (";".join(s["dates"]), ";".join(s["times"])))
     return sessions
-
 
 def get_items_with_sessions():
     with sync_playwright() as p:
