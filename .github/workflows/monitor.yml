@@ -24,6 +24,7 @@ jobs:
         with:
           fetch-depth: 0
 
+      # Sync before anything modifies baseline.json
       - name: Sync with remote
         run: |
           git fetch origin
@@ -46,15 +47,6 @@ jobs:
         run: |
           python monitor.py | tee report.txt
 
-      # Sync with remote to avoid non-fast-forward push errors
-      - name: Sync with remote
-        if: always()
-        run: |
-          git fetch origin
-          git checkout ${{ github.ref_name }}
-          git pull --rebase origin ${{ github.ref_name }}
-
-      # Commit/push updated baseline (if changed)
       - name: Commit updated baseline
         if: always()
         run: |
@@ -62,12 +54,7 @@ jobs:
           git config user.email "${{ secrets.GIT_USER_EMAIL }}"
           git add baseline.json
           git commit -m "Update baseline [skip ci]" || echo "No changes"
-          # Push with a couple retries in case of a race
-          for i in 1 2 3; do
-            git push && break
-            echo "Push failed, retrying..."; sleep 3
-            git pull --rebase origin ${{ github.ref_name }}
-          done
+          git push
 
       # Always email the report (subject reflects diff/no-diff)
       - name: Send email alert (always)
