@@ -212,11 +212,23 @@ def diff_items(old_items, new_items):
 
     return added, removed, changed
 
-def format_report(added, removed, changed):
+def format_report(current_items, added, removed, changed):
     lines = [f"### Aquatics Monitor — {datetime.utcnow().isoformat()}Z",
              "Tracking sessions (dates & times) for:",
              f"- {TARGET_TITLES[0]}",
              f"- {TARGET_TITLES[1]}"]
+
+    # Always show the current snapshot
+    lines.append("\n**Current sessions (now):**")
+    for it in current_items:
+        title = it.get("title", "(unknown)")
+        url = it.get("url") or "(not currently listed)"
+        lines.append(f"- {title} — {url}")
+        if it.get("sessions"):
+            for s in it["sessions"]:
+                lines.append(f"  • dates: {', '.join(s['dates'])} | times: {', '.join(s['times'])}")
+        else:
+            lines.append("  • (no sessions found)")
 
     if added:
         lines.append("\n**Added (now present):**")
@@ -249,9 +261,6 @@ def format_report(added, removed, changed):
             else:
                 lines.append("    • (none)")
 
-    if not added and not removed and not changed:
-        lines.append("\nNo changes detected.")
-
     return "\n".join(lines)
 
 def main():
@@ -260,7 +269,7 @@ def main():
     baseline = load_baseline()
     added, removed, changed = diff_items(baseline["items"], items)
 
-    report = format_report(added, removed, changed)
+    report = format_report(items, added, removed, changed)
     print(report)
 
     save_baseline({"items": items, "last_updated": datetime.utcnow().isoformat()})
