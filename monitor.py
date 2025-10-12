@@ -61,6 +61,114 @@ def open_aquatics(page):
         except:
             continue
 
+def _find_card_container(page, title):
+    """
+    Find the DOM container (div/section/li) that contains the class title.
+    Works on the main page or in civicrec iframes. Returns a Locator or None.
+    """
+    def find_in(scope):
+        # match any element whose visible text contains the title (forgiving)
+        heading = scope.locator(f"xpath=//*[contains(normalize-space(.), {json.dumps(title)})]").first
+        if heading.count() == 0:
+            # try a relaxed match on the left part ("Swim Lesson Level 2")
+            key = title.split(":")[0].strip()
+            heading = scope.locator(f"xpath=//*[contains(normalize-space(.), {json.dumps(key)}) and contains(normalize-space(.), 'Swim')]").first
+        if heading.count() == 0:
+            return None
+        # climb to a reasonably small container (card/item)
+        container = heading.locator(
+            "xpath=ancestor::*[self::div or self::section or self::li][contains(@class,'item') or contains(@class,'card') or contains(@class,'program') or contains(@class,'accordion')][1]"
+        )
+        if container.count() == 0:
+            # fallback: nearest generic container
+            container = heading.locator("xpath=ancestor::*[self::div or self::section or self::li][1]")
+        return container if container.count() > 0 else None
+
+    # 1) try on main page; scroll to trigger lazy load
+    container = find_in(page)
+    if not container:
+        for _ in range(10):
+            page.mouse.wheel(0, 1200)
+            page.wait_for_timeout(150)
+            container = find_in(page)
+            if container:
+                break
+
+    if container:
+        return container
+
+    # 2) try in civicrec iframes
+    for f in page.frames:
+        try:
+            if "secure.rec1.com" not in (f.url or ""):
+                continue
+        except Exception:
+            continue
+        container = find_in(f)
+        if container:
+            return container
+
+    return None
+
+def list_sessions_for_item(page, title):
+    """
+    Locate the card that contains `title`, then read the sessions table inside it.
+    If the table is inside an <iframe>, switch to its content_frame().
+    Returns a sorted list of {"dates":[...], "times":[...]}.
+    """
+    sessions = []
+    card = _find_card_container(page, title)
+    if not card:
+        return sessions  # not on page (treat as not currently listed)
+
+    # If the card is collapsible and closed, try clicking its heading area to open.
+    try:
+        collapsed = card.get_attribute("aria-hidden") == "true"
+    except Exception:
+        collapsed = False
+    if collapsed:
+        try:
+            card.click(timeout=2000)
+            page.wait_for_timeout(400)
+        except Exception:
+            pass
+
+    # If there is an iframe *inside the card*, read the table within that frame
+    iframe_el = card.locator("iframe").first
+    table_scope = card
+    try:
+        if iframe_el.count() > 0:
+            handle = iframe_el.element_handle()
+            fr = handle.content_frame() if handle else None
+            if fr:
+                table_scope = fr
+    except Exception:
+        pass
+
+    # Prefer a table that has a Dates/Time header; else any visible table in the card
+    table = table_scope.locator("table:has(th:has-text('Dates')), table:has(th:has-text('Time'))").first
+    if table.count() == 0:
+        table = table_scope.locator("table:visible").first
+
+    if table.count() > 0:
+        rows = table.locator("tbody tr")
+        if rows.count() == 0:
+            rows = table.locator("tr").nth(1)  # skip header
+        for i in range(rows.count()):
+            row = rows.nth(i)
+            txt = row.inner_text()
+            d, t = extract_dates_times(txt)
+            sessions.append({"dates": d or ["n/a"], "times": t or ["n/a"]})
+    else:
+        # last resort: parse all text from the card
+        txt = table_scope.locator(":scope").inner_text()
+        d, t = extract_dates_times(txt)
+        sessions.append({"dates": d or ["n/a"], "times": t or ["n/a"]})
+
+    # stable order for diffs
+    sessions.sort(key=lambda s: (";".join(s["dates"]), ";".join(s["times"])))
+    return sessions
+
 def get_items_with_sessions():
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
@@ -68,17 +176,22 @@ def get_items_with_sessions():
         page = ctx.new_page()
 
         open_aquatics(page)
-        # scroll to trigger lazy load of cards/panels
-        for _ in range(8):
+        # force lazy content to load
+        for _ in range(10):
             page.mouse.wheel(0, 1200)
-            page.wait_for_timeout(150)
+            page.wait_for_timeout(120)
 
         items = []
         for title in TARGET_TITLES:
-            link = _find_anchor_anywhere(page, title)
+            card = _find_card_container(page, title)
             url = None
-            if link and link.count() > 0:
-                href = (link.first.get_attribute("href") or "").strip()
+            if card:
+                # try to pull a stable href if present; otherwise mint an inline tag
+                try:
+                    maybe_link = card.locator("a", has_text=re.compile(re.escape(title), re.I)).first
+                    href = (maybe_link.get_attribute("href") or "").strip() if maybe_link.count() > 0 else ""
+                except Exception:
+                    href = ""
                 if href.startswith("http"):
                     url = href
                 elif href.startswith("/"):
@@ -90,82 +203,9 @@ def get_items_with_sessions():
             items.append({"title": title, "url": url, "sessions": sessions})
 
         browser.close()
+
     items.sort(key=lambda x: (x["title"].lower(), x["url"] or ""))
     return items
-
-def _find_anchor_anywhere(page, title):
-    """
-    Find the <a> for a class title on the main page or inside civicrec iframes.
-    Scrolls to trigger lazy load. Returns a Locator or None.
-    """
-    def find_in(scope):
-        # exact first
-        loc = scope.get_by_role("link", name=title, exact=True)
-        if loc.count() > 0:
-            return loc
-        # relaxed (case-insensitive)
-        loc = scope.get_by_role("link", name=re.compile(re.escape(title), re.I))
-        if loc.count() > 0:
-            return loc
-        # partial on the left part (e.g., "Swim Lesson Level 2")
-        key = title.split(":")[0].strip()
-        loc = scope.get_by_role("link", name=re.compile(re.escape(key), re.I))
-        if loc.count() > 0:
-            return loc
-        return None
-
-    link = find_in(page)
-    if not link or link.count() == 0:
-        # lazily loaded; scroll
-        for _ in range(8):
-            page.mouse.wheel(0, 1200)
-            page.wait_for_timeout(200)
-            link = find_in(page)
-            if link and link.count() > 0:
-                break
-
-    if not link or link.count() == 0:
-        # try civicrec frames
-        for f in page.frames:
-            try:
-                if "secure.rec1.com" not in (f.url or ""):
-                    continue
-            except Exception:
-                continue
-            link = find_in(f)
-            if link and link.count() > 0:
-                break
-
-    return link if link and link.count() > 0 else None
-
-def _panel_locator_for_link(page, link):
-    """
-    Resolve the accordion panel element that the link controls.
-    Looks for aria-controls, data-target, or href="#id".
-    Returns a Locator or None.
-    """
-    # Work with the first match
-    l = link.first
-    panel_id = None
-    for attr in ("aria-controls", "data-target", "data-bs-target", "href"):
-        try:
-            val = (l.get_attribute(attr) or "").strip()
-        except Exception:
-            val = ""
-        if not val:
-            continue
-        if val.startswith("#"):            # href="#panel-123"
-            panel_id = val[1:]
-            break
-        if attr in ("aria-controls", "data-target", "data-bs-target"):
-            # may be "#id" or "id"
-            panel_id = val[1:] if val.startswith("#") else val
-            break
-
-    if not panel_id:
-        return None
-
-    return page.locator(f"#{panel_id}")
 
 def click_item_by_title(page, title):
     """
@@ -219,115 +259,6 @@ def get_catalog_frame(page):
         except Exception:
             pass
     return page
-
-def list_sessions_for_item(page, title):
-    """
-    Clicks the class title to expand its panel, then parses the sessions table
-    inside that panel. If the table is inside an <iframe>, switch to its frame.
-    Returns a sorted list of {"dates":[...], "times":[...]}.
-    """
-    sessions = []
-
-    link = _find_anchor_anywhere(page, title)
-    if not link:
-        return sessions
-
-    # Find the controlled panel
-    panel = _panel_locator_for_link(page, link)
-    # If we couldn't resolve, just click and fallback to nearest visible table
-    if not panel or panel.count() == 0:
-        link.first.click(timeout=5000)
-        page.wait_for_timeout(500)
-        # nearest visible table below link
-        tables = page.locator("table:visible").all()
-        if tables:
-            rows = tables[0].locator("tbody tr")
-            if rows.count() == 0:
-                rows = tables[0].locator("tr").nth(1)
-            for i in range(rows.count()):
-                r = rows.nth(i)
-                row_text = r.inner_text()
-                d, t = extract_dates_times(row_text)
-                sessions.append({"dates": d or ["n/a"], "times": t or ["n/a"]})
-        return sorted(sessions, key=lambda s: (";".join(s["dates"]), ";".join(s["times"])))
-
-    # Ensure the panel is expanded (click if needed)
-    try:
-        aria_expanded = link.first.get_attribute("aria-expanded")
-    except Exception:
-        aria_expanded = None
-    if aria_expanded in (None, "false"):
-        link.first.click(timeout=5000)
-        page.wait_for_timeout(500)
-
-    # If the site renders an iframe inside the panel, enter it
-    iframe_loc = panel.locator("iframe").first
-    table_scope = panel
-    try:
-        if iframe_loc.count() > 0:
-            # Get the frame from the iframe element
-            handle = iframe_loc.element_handle()
-            if handle:
-                frame = handle.content_frame()
-                if frame:
-                    table_scope = frame
-    except Exception:
-        pass
-
-    # Parse sessions table inside the panel/frame
-    table = table_scope.locator("table:has(th:has-text('Dates')), table:has(th:has-text('Time'))").first
-    if table.count() == 0:
-        # fallback: any visible table in the panel/frame
-        table = table_scope.locator("table:visible").first
-
-    if table.count() > 0:
-        rows = table.locator("tbody tr")
-        if rows.count() == 0:
-            rows = table.locator("tr").nth(1)
-        for i in range(rows.count()):
-            r = rows.nth(i)
-            row_text = r.inner_text()
-            d, t = extract_dates_times(row_text)
-            sessions.append({"dates": d or ["n/a"], "times": t or ["n/a"]})
-    else:
-        # last resort: text of the panel
-        text = table_scope.locator(":scope").inner_text()
-        d, t = extract_dates_times(text)
-        sessions.append({"dates": d or ["n/a"], "times": t or ["n/a"]})
-
-    return sorted(sessions, key=lambda s: (";".join(s["dates"]), ";".join(s["times"])))
-
-def get_items_with_sessions():
-    """Return only the two target items with title, url (or tag), and sessions."""
-    with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True)
-        ctx = browser.new_context()
-        page = ctx.new_page()
-
-        open_aquatics(page)
-
-        items = []
-        for title in TARGET_TITLES:
-            # Try to get a stable identifier
-            link = _find_anchor_anywhere(page, title)
-            url = None
-            if link and link.count() > 0:
-                href = (link.first.get_attribute("href") or "").strip()
-                if href.startswith("http"):
-                    url = href
-                elif href.startswith("/"):
-                    url = f"https://secure.rec1.com{href}"
-                elif href.startswith("javascript"):
-                    # Inline expansion; fabricate a stable tag so diffs include context
-                    url = "inline:" + re.sub(r"[^a-z0-9]+", "-", title.lower()).strip("-")
-
-            sessions = list_sessions_for_item(page, title)
-            items.append({"title": title, "url": url, "sessions": sessions})
-
-        browser.close()
-
-    items.sort(key=lambda x: (x["title"].lower(), x["url"] or ""))
-    return items
 
 def load_baseline():
     if BASELINE_FILE.exists():
