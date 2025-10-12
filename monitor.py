@@ -63,30 +63,55 @@ def open_aquatics(page):
 
 def _find_anchor_anywhere(page, title):
     """
-    Find an <a> containing the title on the page OR inside any iframe.
-    Returns a Locator or None.
+    Return a Locator for the link whose accessible name contains the given title,
+    searching the main page and any CivicRec iframes. Scrolls to trigger lazy load.
     """
-    # Try exact, then partial, on the main page
-    loc = page.locator(f"a:has-text('{title}')")
-    if loc.count() == 0:
-        loc = page.locator("a", has_text=re.compile(re.escape(title), re.I))
-    if loc.count() > 0:
-        return loc
-
-    # Try frames (list view can be inside an iframe on some deployments)
-    for f in page.frames:
-        try:
-            if "secure.rec1.com" not in (f.url or ""):
-                continue
-        except Exception:
-            continue
-        loc = f.locator(f"a:has-text('{title}')")
-        if loc.count() == 0:
-            loc = f.locator("a", has_text=re.compile(re.escape(title), re.I))
+    def find_in(scope):
+        # exact
+        loc = scope.get_by_role("link", name=title, exact=True)
         if loc.count() > 0:
             return loc
+        # relaxed (case-insensitive, ignores line breaks/whitespace diffs)
+        loc = scope.get_by_role("link", name=re.compile(re.escape(title), re.I))
+        if loc.count() > 0:
+            return loc
+        # partial keyword match (e.g., "Sea Horses", "Baby Pups")
+        key = title.split(":")[0].strip()  # "Swim Lesson Level 2"
+        loc = scope.get_by_role("link", name=re.compile(re.escape(key), re.I))
+        if loc.count() > 0:
+            return loc
+        # last fallback
+        words = title.split()
+        if words:
+            loc = scope.locator("a", has_text=re.compile(re.escape(words[-2] + " " + words[-1]), re.I))
+            if loc.count() > 0:
+                return loc
+        return None
 
-    return None
+    # try main page
+    link = find_in(page)
+    if not link or link.count() == 0:
+        # scroll a bit to trigger lazy content
+        for _ in range(6):
+            page.mouse.wheel(0, 1000)
+            page.wait_for_timeout(250)
+            link = find_in(page)
+            if link and link.count() > 0:
+                break
+
+    if not link or link.count() == 0:
+        # try civicrec iframes
+        for f in page.frames:
+            try:
+                if "secure.rec1.com" not in (f.url or ""):
+                    continue
+            except Exception:
+                continue
+            link = find_in(f)
+            if link and link.count() > 0:
+                break
+
+    return link if link and link.count() > 0 else None
 
 def click_item_by_title(page, title):
     """
@@ -143,81 +168,79 @@ def get_catalog_frame(page):
 
 def list_sessions_for_item(page, title):
     """
-    Clicks the title. If it expands inline (href=javascript:void(0)),
-    parse the nearest visible sessions table. If it navigates, fall back
-    to the old frame/table logic. Always returns a sorted list of sessions.
+    Click the class title to expand in place. Then find the session table that
+    belongs to that heading (nearest table below). If the site inserts an iframe
+    in the expanded card, read the first visible table inside that iframe.
     """
-    # Find the anchor (page or any iframe), then click it
     link = _find_anchor_anywhere(page, title)
-    if link is None or link.count() == 0:
-        # Not found at all
+    if not link:
         return []
 
-    href = (link.first.get_attribute("href") or "").strip()
+    # click (sometimes needs 2 clicks if already open/close)
     link.first.click(timeout=5000)
-    page.wait_for_timeout(900)  # let the panel expand or route change
+    page.wait_for_timeout(600)
+
+    # Helper: get Y position of the heading link to choose the nearest table below it
+    try:
+        y_top = link.first.bounding_box()["y"]
+    except Exception:
+        y_top = None
+
+    # Case A: table is in same document
+    candidates = page.locator("table:visible").all()  # grab all visible tables
+    nearest = None
+    nearest_dy = 1e9
+    for tbl in candidates:
+        try:
+            box = tbl.bounding_box()
+            if not box:
+                continue
+            dy = box["y"] - (y_top or 0)
+            if dy >= 0 and dy < nearest_dy:  # must be below the link
+                nearest = tbl
+                nearest_dy = dy
+        except Exception:
+            continue
 
     sessions = []
-
-    # Case A: inline expansion (typical -> href "javascript:void(0)")
-    if href.startswith("javascript"):
-        # Prefer a visible table with Dates/Time headers
-        table = page.locator("table:visible:has(th:has-text('Dates')), table:visible:has(th:has-text('Time'))").first
-        if table.count() == 0:
-            # Sometimes the expanded content is rendered in an iframe inside the panel
-            for f in page.frames:
-                try:
-                    if "secure.rec1.com" not in (f.url or ""):
-                        continue
-                except Exception:
-                    continue
-                cand = f.locator("table:visible:has(th:has-text('Dates')), table:visible:has(th:has-text('Time'))").first
-                if cand.count() > 0:
-                    table = cand
-                    break
-
-        if table.count() > 0:
-            rows = table.locator("tbody tr")
-            if rows.count() == 0:
-                rows = table.locator("tr").nth(1)  # skip header if no <tbody>
-            for i in range(rows.count()):
-                r = rows.nth(i)
-                row_text = r.inner_text()
-                dates, times = extract_dates_times(row_text)
-                sessions.append({"dates": dates or ["n/a"], "times": times or ["n/a"]})
-        else:
-            # Fallback: grab text from the expanded region
-            body = page.locator("body")
-            dates, times = extract_dates_times(body.inner_text())
+    def parse_table(tbl):
+        rows = tbl.locator("tbody tr")
+        if rows.count() == 0:
+            rows = tbl.locator("tr").nth(1)  # skip header if no <tbody>
+        for i in range(rows.count()):
+            r = rows.nth(i)
+            row_text = r.inner_text()
+            dates, times = extract_dates_times(row_text)
             sessions.append({"dates": dates or ["n/a"], "times": times or ["n/a"]})
 
-        # No navigation happened; stay on the list page (no go_back)
-
+    if nearest:
+        parse_table(nearest)
     else:
-        # Case B: navigation to a detail page/route (older deployments)
-        frame = get_catalog_frame(page)
-        table = frame.locator("table:has(th:has-text('Dates')), table:has(th:has-text('Time'))")
-        if table.count() > 0:
-            rows = table.locator("tbody tr")
-            if rows.count() == 0:
-                rows = table.locator("tr").nth(1)
-            for i in range(rows.count()):
-                r = rows.nth(i)
-                row_text = r.inner_text()
-                dates, times = extract_dates_times(row_text)
-                sessions.append({"dates": dates or ["n/a"], "times": times or ["n/a"]})
-        else:
-            body = frame.locator("body")
-            if body.count() == 0:
-                body = page.locator("body")
-            dates, times = extract_dates_times(body.inner_text())
+        # Case B: expanded pane uses an iframe; choose first visible table inside civicrec frames
+        found = False
+        for f in page.frames:
+            try:
+                if "secure.rec1.com" not in (f.url or ""):
+                    continue
+            except Exception:
+                continue
+            t = f.locator("table:visible").first
+            if t.count() > 0:
+                parse_table(t)
+                found = True
+                break
+        if not found:
+            # Last resort: scrape the expanded block text near the heading
+            # Use the closest container under the link (2 ancestor levels) and read its text
+            try:
+                container = link.first.locator("xpath=ancestor::*[self::div or self::li or self::section][1]")
+                txt = container.inner_text()
+            except Exception:
+                txt = page.locator("body").inner_text()
+            dates, times = extract_dates_times(txt)
             sessions.append({"dates": dates or ["n/a"], "times": times or ["n/a"]})
 
-        # Go back to listing for next item
-        page.go_back(wait_until="domcontentloaded")
-        page.wait_for_timeout(700)
-
-    # Stable sort for diffs
+    # Keep the card open; we’re still on the list page. Stable sort for diffs.
     sessions.sort(key=lambda s: (";".join(s["dates"]), ";".join(s["times"])))
     return sessions
 
