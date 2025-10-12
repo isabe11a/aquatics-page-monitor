@@ -215,26 +215,7 @@ def list_sessions_for_item(page, title):
     # Build candidate scopes (bounded search)
     scopes = _all_candidate_scopes(page, heading)
 
-    def parse_table_safely(tbl):
-        out = []
-        try:
-            try:
-                tbl.wait_for(state="visible", timeout=5000)
-            except Exception:
-                pass
-
-            # ---- Inspect headers (log for debugging) ----
-            head_loc = tbl.locator("thead tr th")
-            head_count = head_loc.count()
-            headers = []
-            for i in range(head_count):
-                try:
-                    headers.append((head_loc.nth(i).inner_text() or "").strip())
-                except Exception:
-                    headers.append("")
-            if headers:
-                log(f"header cells: {headers}")
-
+    # ------ helper: parse a plain HTML table by header indices ------
     def parse_table_by_headers(tbl):
         out = []
         # ensure rendered
@@ -263,29 +244,33 @@ def list_sessions_for_item(page, title):
                 if ("time" in h or "times" in h) and times_col is None:
                     times_col = i
 
+        # hard fallback to common CivicRec positions (0-based)
+        if dates_col is None:
+            dates_col = 4
+        if times_col is None:
+            times_col = 5
+
         # rows
         rows = tbl.locator("tbody tr")
         if rows.count() == 0:
-            # no <tbody> -> use all rows after first
             all_rows = tbl.locator("tr")
-            rows = all_rows.nth(1)
+            if all_rows.count() > 1:
+                rows = all_rows.nth(1)
+            else:
+                rows = tbl.locator("tr")
 
         def cell_text(row, col_idx):
-            if col_idx is None:
-                return ""
+            if col_idx is None: return ""
             return (row.locator(f"td:nth-child({col_idx+1})").inner_text() or "").strip()
 
-        # iterate
         count = rows.count() if hasattr(rows, "count") else 0
         for i in range(count):
             r = rows.nth(i)
             dates_txt = cell_text(r, dates_col)
             times_txt = cell_text(r, times_col)
             d_dates, d_times = extract_dates_times(f"{dates_txt} {times_txt}")
-            out.append({
-                "dates": d_dates or ["n/a"],
-                "times": d_times or ["n/a"],
-            })
+            if d_dates or d_times:
+                out.append({"dates": d_dates or ["n/a"], "times": d_times or ["n/a"]})
         return out
 
     # 1) Try plain HTML tables in the same document
@@ -297,7 +282,7 @@ def list_sessions_for_item(page, title):
             tbl = loc.nth(i)
             if tbl.count() == 0 or not tbl.is_visible():
                 continue
-            parsed = parse_table_safely(tbl) if "parse_table_safely" in globals() else parse_table_by_headers(tbl)
+            parsed = parse_table_by_headers(tbl)
             if parsed:
                 sessions.extend(parsed)
         if sessions:
@@ -344,7 +329,7 @@ def list_sessions_for_item(page, title):
 
             parsed = []
             if tbl.count() > 0:
-                parsed = parse_table_safely(tbl) if "parse_table_safely" in globals() else parse_table_by_headers(tbl)
+                parsed = parse_table_by_headers(tbl)
             if not parsed:
                 # Try ARIA grid inside the frame
                 grid = fr.locator('[role="grid"], [role="table"]').first
@@ -369,6 +354,7 @@ def list_sessions_for_item(page, title):
         sessions.append({"dates": d or ["n/a"], "times": t or ["n/a"]})
     sessions.sort(key=lambda s: (";".join(s["dates"]), ";".join(s["times"])))
     return sessions
+
 
 def get_items_with_sessions():
     with sync_playwright() as p:
