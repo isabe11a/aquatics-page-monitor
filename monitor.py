@@ -85,16 +85,16 @@ def _find_heading_anywhere(page, title):
 
 def list_sessions_for_item(page, title):
     """
-    Strategy: find the element with the title text (any tag).
-    Then take the **next table in the DOM**; if not present,
-    take the **first table in the next iframe**.
+    Find the heading that contains `title`, then parse the first sessions table
+    that follows it (or the first table inside the next iframe). Dates/Times are
+    extracted by header index for reliability.
     """
     sessions = []
     heading = _find_heading_anywhere(page, title)
     if not heading:
         return sessions  # treat as not listed
 
-    # Try to expand if collapsible
+    # Expand if collapsible
     try:
         ae = heading.get_attribute("aria-expanded")
         if ae == "false":
@@ -103,20 +103,68 @@ def list_sessions_for_item(page, title):
     except Exception:
         pass
 
-    # 1) Next table after heading (same document)
+    def parse_table_by_headers(tbl):
+        out = []
+        # ensure rendered
+        try:
+            tbl.wait_for(state="visible", timeout=5000)
+        except Exception:
+            pass
+
+        # find header indices
+        ths = tbl.locator("thead tr th")
+        dates_col = times_col = None
+        if ths.count() > 0:
+            for i in range(ths.count()):
+                h = (ths.nth(i).inner_text() or "").strip().lower()
+                if "date" in h and dates_col is None:
+                    dates_col = i
+                if ("time" in h or "times" in h) and times_col is None:
+                    times_col = i
+        else:
+            # fallback: use first row as header
+            first = tbl.locator("tr").first.locator("th,td")
+            for i in range(first.count()):
+                h = (first.nth(i).inner_text() or "").strip().lower()
+                if "date" in h and dates_col is None:
+                    dates_col = i
+                if ("time" in h or "times" in h) and times_col is None:
+                    times_col = i
+
+        # rows
+        rows = tbl.locator("tbody tr")
+        if rows.count() == 0:
+            # no <tbody> -> use all rows after first
+            all_rows = tbl.locator("tr")
+            rows = all_rows.nth(1)
+
+        def cell_text(row, col_idx):
+            if col_idx is None:
+                return ""
+            return (row.locator(f"td:nth-child({col_idx+1})").inner_text() or "").strip()
+
+        # iterate
+        count = rows.count() if hasattr(rows, "count") else 0
+        for i in range(count):
+            r = rows.nth(i)
+            dates_txt = cell_text(r, dates_col)
+            times_txt = cell_text(r, times_col)
+            d_dates, d_times = extract_dates_times(f"{dates_txt} {times_txt}")
+            out.append({
+                "dates": d_dates or ["n/a"],
+                "times": d_times or ["n/a"],
+            })
+        return out
+
+    # ---------- 1) Next table in same document ----------
     next_table = heading.locator("xpath=following::table[1]").first
     if next_table.count() > 0 and next_table.is_visible():
         log(f"next table found for {title} (same doc)")
-        rows = next_table.locator("tbody tr")
-        if rows.count() == 0:
-            rows = next_table.locator("tr").nth(1)
-        for i in range(rows.count()):
-            txt = rows.nth(i).inner_text()
-            d, t = extract_dates_times(txt)
-            sessions.append({"dates": d or ["n/a"], "times": t or ["n/a"]})
-        return sorted(sessions, key=lambda s: (";".join(s["dates"]), ";".join(s["times"])))
+        sessions = parse_table_by_headers(next_table)
+        sessions.sort(key=lambda s: (";".join(s["dates"]), ";".join(s["times"])))
+        return sessions
 
-    # 2) Next iframe after heading -> first table inside it
+    # ---------- 2) Next iframe after heading -> first table inside ----------
     next_iframe = heading.locator("xpath=following::iframe[1]").first
     if next_iframe.count() > 0:
         log(f"iframe found for {title}")
@@ -131,16 +179,11 @@ def list_sessions_for_item(page, title):
             if tbl.count() == 0:
                 tbl = fr.locator("table").first
             if tbl.count() > 0:
-                rows = tbl.locator("tbody tr")
-                if rows.count() == 0:
-                    rows = tbl.locator("tr").nth(1)
-                for i in range(rows.count()):
-                    txt = rows.nth(i).inner_text()
-                    d, t = extract_dates_times(txt)
-                    sessions.append({"dates": d or ["n/a"], "times": t or ["n/a"]})
-                return sorted(sessions, key=lambda s: (";".join(s["dates"]), ";".join(s["times"])))
+                sessions = parse_table_by_headers(tbl)
+                sessions.sort(key=lambda s: (";".join(s["dates"]), ";".join(s["times"])))
+                return sessions
 
-    # 3) Last resort: parse nearby block text
+    # ---------- 3) Last resort: nearby text ----------
     try:
         block = heading.locator("xpath=following::*[self::div or self::section][1]")
         txt = block.inner_text()
@@ -148,7 +191,8 @@ def list_sessions_for_item(page, title):
         txt = page.locator("body").inner_text()
     d, t = extract_dates_times(txt)
     sessions.append({"dates": d or ["n/a"], "times": t or ["n/a"]})
-    return sorted(sessions, key=lambda s: (";".join(s["dates"]), ";".join(s["times"])))
+    sessions.sort(key=lambda s: (";".join(s["dates"]), ";".join(s["times"])))
+    return sessions
 
 def get_items_with_sessions():
     with sync_playwright() as p:
@@ -185,18 +229,21 @@ def load_baseline():
 def save_baseline(data):
     BASELINE_FILE.write_text(json.dumps(data, indent=2, ensure_ascii=False))
 
+def _has_real_sessions(item):
+    for s in item.get("sessions", []):
+        if (s.get("dates") and s["dates"] != ["n/a"]) or (s.get("times") and s["times"] != ["n/a"]):
+            return True
+    return False
+
 def diff_items(old_items, new_items):
     old_map = {i["title"]: i for i in old_items}
     new_map = {i["title"]: i for i in new_items}
     added, removed, changed = [], [], []
-    titles = set(TARGET_TITLES)
-
-    for t in titles:
+    for t in TARGET_TITLES:
         old = old_map.get(t, {"title": t, "url": None, "sessions": []})
         new = new_map.get(t, {"title": t, "url": None, "sessions": []})
-        old_present = bool(old.get("sessions"))
-        new_present = bool(new.get("sessions"))
-
+        old_present = _has_real_sessions(old)
+        new_present = _has_real_sessions(new)
         if not old_present and new_present:
             added.append(new)
         elif old_present and not new_present:
