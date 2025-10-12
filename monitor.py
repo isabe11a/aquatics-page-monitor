@@ -1,4 +1,4 @@
-# monitor.py  — robust, logs heavily, always prints a report
+# monitor.py — Clean production version
 import json
 import re
 import sys
@@ -20,9 +20,6 @@ DATE_SINGLE = re.compile(r"\b\d{1,2}/\d{1,2}\b")
 TIME_RANGE = re.compile(r"\b\d{1,2}:\d{2}\s*[AP]M\s*[-–]\s*\d{1,2}:\d{2}\s*[AP]M\b", re.I)
 TIME_SINGLE = re.compile(r"\b\d{1,2}:\d{2}\s*[AP]M\b", re.I)
 
-def log(msg: str):
-    print(f"[monitor] {msg}", flush=True)
-
 def extract_dates_times(text: str):
     dates = set(DATE_RANGE.findall(text))
     if not dates:
@@ -33,27 +30,24 @@ def extract_dates_times(text: str):
     return sorted(dates), sorted(times)
 
 def open_aquatics(page):
-    log(f"goto {CATALOG_URL}")
     page.goto(CATALOG_URL, wait_until="domcontentloaded")
     page.wait_for_timeout(2000)
     
-    # Try clicking the category tab if present
+    # Click Aquatics category
     for label in ["Aquatics Programs", "Aquatics"]:
         loc = page.locator(f"text={label}")
         if loc.count():
-            log(f"clicking category: {label}")
             try:
                 loc.first.click(timeout=3000)
                 page.wait_for_timeout(1200)
                 break
-            except Exception as e:
-                log(f"warn: category click failed: {e}")
+            except:
+                pass
     
-    # Soft scroll to load content
+    # Scroll to load content
     for i in range(15):
         page.mouse.wheel(0, 1200)
         page.wait_for_timeout(150)
-    log("finished initial scroll")
 
 def _frames(page):
     fr = [page]
@@ -61,7 +55,7 @@ def _frames(page):
         try:
             if "secure.rec1.com" in (f.url or ""):
                 fr.append(f)
-        except Exception:
+        except:
             continue
     return fr
 
@@ -81,12 +75,12 @@ def parse_table_by_headers(tbl):
     """Parse a plain HTML table that has session data."""
     out = []
     try:
-        try:
-            tbl.wait_for(state="visible", timeout=3000)
-        except Exception:
-            pass
+        tbl.wait_for(state="visible", timeout=3000)
+    except:
+        pass
 
-        # Header cells
+    try:
+        # Find date and time columns
         ths = tbl.locator("thead tr th, tr th")
         dates_col = times_col = None
 
@@ -98,18 +92,15 @@ def parse_table_by_headers(tbl):
                 if times_col is None and ("time" in h or "times" in h):
                     times_col = i
 
-        # Hard fallback to CivicRec's typical column order
+        # Fallback to typical CivicRec column order
         if dates_col is None:
-            dates_col = 4  # DATES is usually 5th column (0-indexed = 4)
+            dates_col = 4
         if times_col is None:
-            times_col = 5  # TIMES is usually 6th column (0-indexed = 5)
+            times_col = 5
 
-        log(f"[DEBUG] Using dates_col={dates_col}, times_col={times_col}")
-
-        # Data rows
+        # Get data rows
         rows = tbl.locator("tbody tr")
         if rows.count() == 0:
-            # No tbody, try all rows except first (header)
             all_rows = tbl.locator("tr")
             if all_rows.count() > 1:
                 rows = tbl.locator("tr:not(:first-child)")
@@ -122,273 +113,150 @@ def parse_table_by_headers(tbl):
             try:
                 cell = row.locator(f"td:nth-child({idx+1}), th:nth-child({idx+1})")
                 return (cell.inner_text() or "").strip()
-            except Exception:
+            except:
                 return ""
 
+        # Parse each row
         n = rows.count()
-        log(f"[DEBUG] Processing {n} table rows")
         for i in range(n):
             r = rows.nth(i)
             dates_txt = cell_text(r, dates_col)
             times_txt = cell_text(r, times_col)
-            log(f"[DEBUG] Row {i}: dates='{dates_txt}', times='{times_txt}'")
             d_dates, d_times = extract_dates_times(f"{dates_txt} {times_txt}")
             if d_dates or d_times:
                 out.append({"dates": d_dates or ["n/a"], "times": d_times or ["n/a"]})
-    except Exception as e:
-        log(f"[DEBUG] Error parsing table: {e}")
+    except:
+        pass
+    
     return out
 
 def list_sessions_for_item(page, title):
-    """
-    Click the program title to open a modal, then parse the session table in the modal.
-    """
+    """Click the program title to open a modal, then parse the session table."""
     sessions = []
+    modal_found = False
     
-    # Find and click the heading
     heading = _find_heading_anywhere(page, title)
     if not heading:
-        log(f"[DEBUG] Heading not found for: {title}")
         return sessions
-    
-    log(f"[DEBUG] Found heading for: {title}, clicking to open modal")
-    
-    # Count tables before clicking
-    tables_before = page.locator("table").count()
-    log(f"[DEBUG] Tables on page before click: {tables_before}")
     
     try:
         # Click to open modal
         heading.click(timeout=3000)
-        log("[DEBUG] Clicked successfully")
+        page.wait_for_timeout(3000)
         
-        # Wait for modal to animate and content to load
-        page.wait_for_timeout(2000)
-        
-        # Check if any iframes appeared or became visible
-        iframes_before = page.locator("iframe").count()
-        log(f"[DEBUG] Iframes before: {iframes_before}")
-        
-        # Wait for either new tables OR new/visible iframes
-        try:
-            page.wait_for_function(
-                f"document.querySelectorAll('table').length > {tables_before} || "
-                f"document.querySelectorAll('iframe').length > {iframes_before}",
-                timeout=5000
-            )
-            log("[DEBUG] New content appeared (table or iframe)")
-        except Exception as e:
-            log(f"[DEBUG] No new tables/iframes appeared: {e}")
-        
-        page.wait_for_timeout(2000)
-        
-        # Count tables and iframes after clicking
-        tables_after = page.locator("table").count()
-        iframes_after = page.locator("iframe").count()
-        log(f"[DEBUG] Tables: {tables_before} -> {tables_after}")
-        log(f"[DEBUG] Iframes: {iframes_before} -> {iframes_after}")
-        
-        # Check if any iframes became visible
+        # STRATEGY 1: Check all visible iframes for session tables
         all_iframes = page.locator("iframe")
         for i in range(all_iframes.count()):
             iframe = all_iframes.nth(i)
             try:
-                is_visible = iframe.is_visible()
-                if is_visible:
-                    src = iframe.get_attribute("src") or "no-src"
-                    log(f"[DEBUG] Iframe {i} is visible: src={src[:100]}")
-                    
-                    # Try to access this iframe
+                if iframe.is_visible():
                     handle = iframe.element_handle()
                     fr = handle.content_frame() if handle else None
                     if fr:
-                        log(f"[DEBUG] Checking iframe {i} for tables...")
                         iframe_tables = fr.locator("table")
-                        iframe_table_count = iframe_tables.count()
-                        log(f"[DEBUG] Iframe {i} has {iframe_table_count} tables")
-                        
-                        if iframe_table_count > 0:
-                            # Check if these tables have session data
-                            for t in range(iframe_table_count):
-                                tbl = iframe_tables.nth(t)
-                                try:
-                                    text = tbl.inner_text()
-                                    log(f"[DEBUG] Iframe {i} table {t} text length: {len(text)}")
-                                    if len(text) > 100:
-                                        log(f"[DEBUG] Iframe {i} table {t} preview: {text[:200]}")
-                                        if "DATES" in text.upper() and "TIMES" in text.upper():
-                                            log(f"[DEBUG] ✓ Iframe {i} table {t} has session columns!")
-                                            parsed = parse_table_by_headers(tbl)
-                                            if parsed:
-                                                log(f"[DEBUG] ✓ Parsed {len(parsed)} sessions from iframe table")
-                                                sessions.extend(parsed)
-                                                modal_found = True
-                                                break
-                                except Exception as e:
-                                    log(f"[DEBUG] Error reading iframe table: {e}")
-                        
+                        for t in range(iframe_tables.count()):
+                            tbl = iframe_tables.nth(t)
+                            text = tbl.inner_text()
+                            if len(text) > 100 and "DATES" in text.upper() and "TIMES" in text.upper():
+                                parsed = parse_table_by_headers(tbl)
+                                if parsed:
+                                    sessions.extend(parsed)
+                                    modal_found = True
+                                    break
                         if modal_found:
                             break
-            except Exception as e:
-                log(f"[DEBUG] Error checking iframe {i}: {e}")
+            except:
+                pass
         
-        # Strategy 1: Check iframes first (if we found any visible ones above)
-        if not modal_found and iframes_after > iframes_before:
-            log("[DEBUG] New iframe appeared, already checked above")
-        
-        # Strategy 2: Check ALL tables on the page
+        # STRATEGY 2: Check all tables on main page
         if not modal_found:
             tables = page.locator("table")
-            
             for i in range(tables.count()):
                 tbl = tables.nth(i)
                 try:
-                    # Get the text content regardless of visibility
                     text = tbl.inner_text()
-                    log(f"[DEBUG] Table {i} text length: {len(text)}")
-                    
-                    # Skip tables that are too small (under 100 chars can't be a session table)
                     if len(text) < 100:
-                        log(f"[DEBUG] Table {i} too small, skipping")
                         continue
                     
-                    log(f"[DEBUG] Table {i} preview: {text[:200]}")
-                    
-                    # Check if this table has session headers (SESSION, DATES, TIMES columns)
-                    text_upper = text.upper()
-                    has_session_col = "SESSION" in text_upper
-                    has_dates_col = "DATES" in text_upper or "DATE" in text_upper
-                    has_times_col = "TIMES" in text_upper or "TIME" in text_upper
-                    
-                    log(f"[DEBUG] Table {i} - SESSION:{has_session_col}, DATES:{has_dates_col}, TIMES:{has_times_col}")
-                    
-                    if has_dates_col and has_times_col:
-                        log(f"[DEBUG] ✓ Table {i} has session data columns!")
-                        
-                        # Verify it's actually our program by checking if title appears near this table
-                        # Get the parent container
+                    if "DATES" in text.upper() and "TIMES" in text.upper():
+                        # Verify this table belongs to our program
                         parent = tbl.locator("xpath=ancestor::*[self::div or self::section][1]")
                         if parent.count() > 0:
                             parent_text = parent.inner_text()
                             if title.lower() not in parent_text.lower():
-                                log(f"[DEBUG] Table {i} doesn't belong to our program (title not in parent)")
                                 continue
                         
-                        # Try to parse this table
                         parsed = parse_table_by_headers(tbl)
                         if parsed:
-                            log(f"[DEBUG] ✓ Successfully parsed {len(parsed)} sessions from table {i}")
                             sessions.extend(parsed)
                             modal_found = True
                             break
-                        else:
-                            log(f"[DEBUG] Table {i} has headers but parsing returned no sessions")
-                except Exception as e:
-                    log(f"[DEBUG] Error checking table {i}: {e}")
+                except:
+                    pass
         
-        # Strategy 3: Look for modal containers (but be VERY strict about what we accept)
+        # STRATEGY 3: Check for proper modal containers
         if not modal_found:
-            log("[DEBUG] No table found, searching for modal containers")
+            modals = page.locator('[class*="modal"][class*="show"], [class*="modal"][style*="display: block"], [role="dialog"]')
             
-            # Look for containers that likely represent a modal
-            modal_candidates = page.locator(
-                '[class*="modal"], [class*="dialog"], [class*="overlay"], '
-                '[role="dialog"], [aria-modal="true"]'
-            )
-            
-            log(f"[DEBUG] Found {modal_candidates.count()} modal-like containers")
-            
-            for i in range(modal_candidates.count()):
+            for i in range(modals.count()):
                 try:
-                    container = modal_candidates.nth(i)
-                    
-                    # Must be visible
-                    if not container.is_visible():
+                    modal = modals.nth(i)
+                    if not modal.is_visible():
                         continue
                     
-                    text = container.inner_text()
+                    text = modal.inner_text()
                     
-                    # Must contain the program title
+                    # Must contain title AND must NOT be navigation
                     if title.lower() not in text.lower():
-                        log(f"[DEBUG] Modal candidate {i} doesn't contain title")
+                        continue
+                    if "Clear All Filters" in text or "Log In with Email" in text[:200]:
                         continue
                     
-                    # Must NOT be the navigation/filter panel (reject if it has "Filter" or "Cart" near the top)
-                    if "Clear All Filters" in text[:500] or "Log In with Email" in text[:500]:
-                        log(f"[DEBUG] Modal candidate {i} is navigation panel, rejecting")
-                        continue
-                    
-                    # Must have substantial session-related content
-                    if len(text) < 300:
-                        log(f"[DEBUG] Modal candidate {i} too short")
-                        continue
-                    
-                    log(f"[DEBUG] Modal candidate {i} looks promising, checking for dates/times")
-                    log(f"[DEBUG] Preview: {text[:500]}")
-                    
-                    dates, times = extract_dates_times(text)
-                    if dates and times and len(dates) > 0 and len(times) > 0:
-                        log(f"[DEBUG] ✓ Modal {i} has {len(dates)} dates and {len(times)} times")
-                        
-                        # Parse it properly - look for a table inside this modal
-                        tbl_in_modal = container.locator("table").first
-                        if tbl_in_modal.count() > 0:
-                            log(f"[DEBUG] Found table inside modal {i}, parsing...")
-                            parsed = parse_table_by_headers(tbl_in_modal)
+                    # Look for table in this modal
+                    tbl = modal.locator("table").first
+                    if tbl.count() > 0:
+                        tbl_text = tbl.inner_text()
+                        if len(tbl_text) > 100 and "DATES" in tbl_text.upper():
+                            parsed = parse_table_by_headers(tbl)
                             if parsed:
                                 sessions.extend(parsed)
                                 modal_found = True
                                 break
-                        
-                        # Fallback: manually pair dates with times
-                        if not modal_found:
-                            log(f"[DEBUG] No table in modal, using text extraction")
-                            sessions.append({"dates": dates, "times": times})
-                            modal_found = True
-                            break
-                except Exception as e:
-                    log(f"[DEBUG] Error with modal candidate {i}: {e}")
+                except:
+                    pass
         
-        if not modal_found:
-            log(f"[DEBUG] Could not find session data for {title}")
-            log(f"[DEBUG] This might mean:")
-            log(f"[DEBUG] - The modal didn't open (check if site detects headless mode)")
-            log(f"[DEBUG] - Session data loads in a way we haven't detected")
-            log(f"[DEBUG] - The program has no available sessions")
-        
-        if not modal_found:
-            log(f"[DEBUG] Modal/table not found for {title}")
-        
-        # Close the modal by pressing Escape or clicking X
+        # Close modal
         try:
             page.keyboard.press("Escape")
             page.wait_for_timeout(500)
-            log("[DEBUG] Closed modal with Escape")
         except:
-            # Try finding and clicking the X button
-            try:
-                close_btn = page.locator('button:has-text("×"), button:has-text("X"), [class*="close"], [aria-label="Close"]').first
-                if close_btn.count() > 0:
-                    close_btn.click()
-                    page.wait_for_timeout(500)
-                    log("[DEBUG] Closed modal with X button")
-            except:
-                log("[DEBUG] Could not close modal, continuing anyway")
+            pass
         
-    except Exception as e:
-        log(f"[DEBUG] Error processing {title}: {e}")
-        import traceback
-        log(f"[DEBUG] Traceback: {traceback.format_exc()}")
+    except:
+        pass
     
     sessions.sort(key=lambda s: (";".join(s["dates"]), ";".join(s["times"])))
-    log(f"[DEBUG] Total sessions found for {title}: {len(sessions)}")
     return sessions
 
 def get_items_with_sessions():
     with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True)
-        ctx = browser.new_context()
+        browser = p.chromium.launch(
+            headless=True,
+            args=['--disable-blink-features=AutomationControlled']
+        )
+        ctx = browser.new_context(
+            user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            viewport={'width': 1920, 'height': 1080},
+        )
         page = ctx.new_page()
+        
+        # Hide webdriver property
+        page.add_init_script("""
+            Object.defineProperty(navigator, 'webdriver', {
+                get: () => undefined
+            });
+        """)
+        
         open_aquatics(page)
 
         items = []
@@ -396,15 +264,9 @@ def get_items_with_sessions():
             url = "inline:" + re.sub(r"[^a-z0-9]+", "-", title.lower()).strip("-")
             try:
                 sessions = list_sessions_for_item(page, title)
-                log(f"{title}: sessions found = {len(sessions)}")
-            except Exception as e:
-                log(f"ERROR collecting sessions for {title}: {e}")
-                import traceback
-                log(traceback.format_exc())
+            except:
                 sessions = []
             items.append({"title": title, "url": url, "sessions": sessions})
-            
-            # Wait between items
             page.wait_for_timeout(1000)
 
         browser.close()
@@ -416,7 +278,7 @@ def load_baseline():
     if BASELINE_FILE.exists():
         try:
             return json.loads(BASELINE_FILE.read_text())
-        except Exception:
+        except:
             return {"items": [], "last_updated": None}
     return {"items": [], "last_updated": None}
 
@@ -509,11 +371,11 @@ def main():
         report = format_report(items, added, removed, changed)
         print(report, flush=True)
         save_baseline({"items": items, "last_updated": datetime.utcnow().isoformat()})
-        # Signal change (so your email subject + red run works)
+        
+        # Exit 1 if changes detected (triggers workflow alert)
         if added or removed or changed:
             sys.exit(1)
     except Exception as e:
-        # Never leave report.txt empty
         print("### Aquatics Monitor - ERROR\n\n" + str(e), flush=True)
         import traceback
         print("\n" + traceback.format_exc(), flush=True)
