@@ -38,41 +38,100 @@ def open_aquatics(page):
     """Navigate to the Aquatics catalog view (category or search)."""
     page.goto(CATALOG_URL, wait_until="domcontentloaded")
     page.wait_for_timeout(1800)
+
     # Try category buttons
     for label in ["Aquatics Programs", "Aquatics"]:
         loc = page.locator(f"text={label}")
         if loc.count() > 0:
             try:
-                loc.first.click(timeout=2000)
+                loc.first.click(timeout=3000)
                 page.wait_for_timeout(1200)
-                return
+                break
             except:
                 pass
-    # Fallback to search
+
+    # Fallback: search
     for placeholder in ["Keyword or code", "Search"]:
         try:
             s = page.get_by_placeholder(placeholder)
             s.fill("Aquatics")
             s.press("Enter")
             page.wait_for_timeout(1500)
-            return
+            break
         except:
             continue
 
+def _find_anchor_anywhere(page, title):
+    """
+    Find an <a> containing the title on the page OR inside any iframe.
+    Returns a Locator or None.
+    """
+    # Try exact, then partial, on the main page
+    loc = page.locator(f"a:has-text('{title}')")
+    if loc.count() == 0:
+        loc = page.locator("a", has_text=re.compile(re.escape(title), re.I))
+    if loc.count() > 0:
+        return loc
+
+    # Try frames (list view can be inside an iframe on some deployments)
+    for f in page.frames:
+        try:
+            if "secure.rec1.com" not in (f.url or ""):
+                continue
+        except Exception:
+            continue
+        loc = f.locator(f"a:has-text('{title}')")
+        if loc.count() == 0:
+            loc = f.locator("a", has_text=re.compile(re.escape(title), re.I))
+        if loc.count() > 0:
+            return loc
+
+    return None
+
 def click_item_by_title(page, title):
-    """Open an item by its link text (exact first, then case-insensitive partial)."""
-    link = page.get_by_role("link", name=title, exact=True)
-    if link.count() == 0:
-        link = page.get_by_role("link", name=re.compile(re.escape(title), re.I))
+    """
+    Open an item by its link text. Tries page and iframes, with some scrolling.
+    Raises if not found.
+    """
+    # Ensure list has rendered
+    page.wait_for_timeout(800)
+
+    # Try to find without scrolling first
+    link = _find_anchor_anywhere(page, title)
+
+    # If not found, scroll the main page a bit to trigger lazy loading
+    if (link is None) or link.count() == 0:
+        for _ in range(5):
+            page.mouse.wheel(0, 1200)
+            page.wait_for_timeout(400)
+            link = _find_anchor_anywhere(page, title)
+            if link and link.count() > 0:
+                break
+
+    # As a last resort, filter via search box to surface the item
+    if (link is None) or link.count() == 0:
+        for placeholder in ["Keyword or code", "Search"]:
+            try:
+                s = page.get_by_placeholder(placeholder)
+                s.fill(title.split(":")[0])  # search by leading words
+                s.press("Enter")
+                page.wait_for_timeout(1500)
+                link = _find_anchor_anywhere(page, title)
+                if link and link.count() > 0:
+                    break
+            except:
+                pass
+
+    if link is None or link.count() == 0:
+        raise RuntimeError(f"Could not find link for: {title}")
+
     link.first.click(timeout=5000)
     page.wait_for_timeout(1200)
 
 def get_catalog_frame(page):
     """
-    CivicRec sometimes renders detail content in an <iframe>.
     Prefer a frame whose URL contains secure.rec1.com; else fall back to the page.
     """
-    # Give frames a moment to mount
     page.wait_for_timeout(600)
     for f in page.frames:
         try:
@@ -80,7 +139,7 @@ def get_catalog_frame(page):
                 return f
         except Exception:
             pass
-    return page  # fallback
+    return page
 
 def list_sessions_for_item(page, title):
     """Return a normalized sessions list for a given item (list of dicts with dates/times)."""
@@ -213,53 +272,58 @@ def diff_items(old_items, new_items):
     return added, removed, changed
 
 def format_report(current_items, added, removed, changed):
-    lines = [f"### Aquatics Monitor — {datetime.utcnow().isoformat()}Z",
-             "Tracking sessions (dates & times) for:",
-             f"- {TARGET_TITLES[0]}",
-             f"- {TARGET_TITLES[1]}"]
+    lines = [
+        "### Aquatics Monitor - " + datetime.utcnow().isoformat() + "Z",
+        "Tracking sessions (dates & times) for:",
+        "- " + TARGET_TITLES[0],
+        "- " + TARGET_TITLES[1],
+        "",
+        "**Current sessions (now):**",
+    ]
 
-    # Always show the current snapshot
-    lines.append("\n**Current sessions (now):**")
     for it in current_items:
         title = it.get("title", "(unknown)")
         url = it.get("url") or "(not currently listed)"
-        lines.append(f"- {title} — {url}")
+        lines.append(f"- {title} - {url}")
         if it.get("sessions"):
             for s in it["sessions"]:
-                lines.append(f"  • dates: {', '.join(s['dates'])} | times: {', '.join(s['times'])}")
+                lines.append(f"  * dates: {', '.join(s['dates'])} | times: {', '.join(s['times'])}")
         else:
-            lines.append("  • (no sessions found)")
+            lines.append("  * (no sessions found)")
 
     if added:
-        lines.append("\n**Added (now present):**")
+        lines.append("")
+        lines.append("**Added (now present):**")
         for a in added:
-            lines.append(f"- {a['title']} — {a.get('url','')}")
+            lines.append(f"- {a['title']} - {a.get('url','')}")
             for s in a.get("sessions", []):
-                lines.append(f"  • dates: {', '.join(s['dates'])} | times: {', '.join(s['times'])}")
+                lines.append(f"  * dates: {', '.join(s['dates'])} | times: {', '.join(s['times'])}")
 
     if removed:
-        lines.append("\n**Removed (now missing):**")
+        lines.append("")
+        lines.append("**Removed (now missing):**")
         for r in removed:
-            lines.append(f"- {r['title']} — {r.get('url','')}")
+            lines.append(f"- {r['title']} - {r.get('url','')}")
             for s in r.get("sessions", []):
-                lines.append(f"  • last dates: {', '.join(s['dates'])} | times: {', '.join(s['times'])}")
+                lines.append(f"  * last dates: {', '.join(s['dates'])} | times: {', '.join(s['times'])}")
 
     if changed:
-        lines.append("\n**Changed sessions:**")
+        lines.append("")
+        lines.append("**Changed sessions:**")
         for c in changed:
-            lines.append(f"- {c['title']} — {c.get('url','')}")
+            lines.append(f"- {c['title']} - {c.get('url','')}")
             lines.append("  old:")
             if c["old_sessions"]:
                 for s in c["old_sessions"]:
-                    lines.append(f"    • dates: {', '.join(s['dates'])} | times: {', '.join(s['times'])}")
+                    lines.append(f"    * dates: {', '.join(s['dates'])} | times: {', '.join(s['times'])}")
             else:
-                lines.append("    • (none)")
+                lines.append("    * (none)")
             lines.append("  new:")
             if c["new_sessions"]:
                 for s in c["new_sessions"]:
-                    lines.append(f"    • dates: {', '.join(s['dates'])} | times: {', '.join(s['times'])}")
+                    lines.append(f"    * dates: {', '.join(s['dates'])} | times: {', '.join(s['times'])}")
             else:
-                lines.append("    • (none)")
+                lines.append("    * (none)")
 
     return "\n".join(lines)
 
