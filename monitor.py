@@ -163,82 +163,198 @@ def list_sessions_for_item(page, title):
         log("[DEBUG] Clicked successfully")
         
         # Wait for modal to animate and content to load
-        page.wait_for_timeout(3000)
+        page.wait_for_timeout(2000)
         
-        # Wait for NEW tables to appear (more than the 2 that existed before)
+        # Check if any iframes appeared or became visible
+        iframes_before = page.locator("iframe").count()
+        log(f"[DEBUG] Iframes before: {iframes_before}")
+        
+        # Wait for either new tables OR new/visible iframes
         try:
             page.wait_for_function(
-                f"document.querySelectorAll('table').length > {tables_before}",
+                f"document.querySelectorAll('table').length > {tables_before} || "
+                f"document.querySelectorAll('iframe').length > {iframes_before}",
                 timeout=5000
             )
-            log("[DEBUG] New table appeared on page")
+            log("[DEBUG] New content appeared (table or iframe)")
         except Exception as e:
-            log(f"[DEBUG] No new tables appeared: {e}")
+            log(f"[DEBUG] No new tables/iframes appeared: {e}")
         
-        # Count tables after clicking
+        page.wait_for_timeout(2000)
+        
+        # Count tables and iframes after clicking
         tables_after = page.locator("table").count()
-        log(f"[DEBUG] Tables on page after click: {tables_after}")
+        iframes_after = page.locator("iframe").count()
+        log(f"[DEBUG] Tables: {tables_before} -> {tables_after}")
+        log(f"[DEBUG] Iframes: {iframes_before} -> {iframes_after}")
         
-        # Strategy 1: Check ALL tables on the page (not just visible ones)
-        # The modal table might not register as "visible" for some CSS reason
-        modal_found = False
-        tables = page.locator("table")
-        
-        for i in range(tables.count()):
-            tbl = tables.nth(i)
+        # Check if any iframes became visible
+        all_iframes = page.locator("iframe")
+        for i in range(all_iframes.count()):
+            iframe = all_iframes.nth(i)
             try:
-                # Get the text content regardless of visibility
-                text = tbl.inner_text()
-                log(f"[DEBUG] Table {i} text length: {len(text)}")
-                
-                # Check if this table has session headers
-                if ("DATES" in text.upper() or "DATE" in text.upper()) and ("TIMES" in text.upper() or "TIME" in text.upper()):
-                    log(f"[DEBUG] ✓ Table {i} has DATES and TIMES columns!")
-                    log(f"[DEBUG] Table {i} preview: {text[:300]}")
+                is_visible = iframe.is_visible()
+                if is_visible:
+                    src = iframe.get_attribute("src") or "no-src"
+                    log(f"[DEBUG] Iframe {i} is visible: src={src[:100]}")
                     
-                    # Try to parse this table
-                    parsed = parse_table_by_headers(tbl)
-                    if parsed:
-                        log(f"[DEBUG] ✓ Successfully parsed {len(parsed)} sessions from table {i}")
-                        sessions.extend(parsed)
-                        modal_found = True
-                        break
-                    else:
-                        log(f"[DEBUG] Table {i} has headers but parsing returned no sessions")
+                    # Try to access this iframe
+                    handle = iframe.element_handle()
+                    fr = handle.content_frame() if handle else None
+                    if fr:
+                        log(f"[DEBUG] Checking iframe {i} for tables...")
+                        iframe_tables = fr.locator("table")
+                        iframe_table_count = iframe_tables.count()
+                        log(f"[DEBUG] Iframe {i} has {iframe_table_count} tables")
+                        
+                        if iframe_table_count > 0:
+                            # Check if these tables have session data
+                            for t in range(iframe_table_count):
+                                tbl = iframe_tables.nth(t)
+                                try:
+                                    text = tbl.inner_text()
+                                    log(f"[DEBUG] Iframe {i} table {t} text length: {len(text)}")
+                                    if len(text) > 100:
+                                        log(f"[DEBUG] Iframe {i} table {t} preview: {text[:200]}")
+                                        if "DATES" in text.upper() and "TIMES" in text.upper():
+                                            log(f"[DEBUG] ✓ Iframe {i} table {t} has session columns!")
+                                            parsed = parse_table_by_headers(tbl)
+                                            if parsed:
+                                                log(f"[DEBUG] ✓ Parsed {len(parsed)} sessions from iframe table")
+                                                sessions.extend(parsed)
+                                                modal_found = True
+                                                break
+                                except Exception as e:
+                                    log(f"[DEBUG] Error reading iframe table: {e}")
+                        
+                        if modal_found:
+                            break
             except Exception as e:
-                log(f"[DEBUG] Error checking table {i}: {e}")
+                log(f"[DEBUG] Error checking iframe {i}: {e}")
         
-        # Strategy 2: If no table found, look for any element with title and dates/times in text
+        # Strategy 1: Check iframes first (if we found any visible ones above)
+        if not modal_found and iframes_after > iframes_before:
+            log("[DEBUG] New iframe appeared, already checked above")
+        
+        # Strategy 2: Check ALL tables on the page
         if not modal_found:
-            log("[DEBUG] No table found, trying text-based search for modal")
+            tables = page.locator("table")
             
-            # Look for any div/section that contains both the title and date patterns
-            all_containers = page.locator('div, section, [role="dialog"]')
-            log(f"[DEBUG] Checking {min(50, all_containers.count())} containers for session data")
-            
-            for i in range(min(50, all_containers.count())):
+            for i in range(tables.count()):
+                tbl = tables.nth(i)
                 try:
-                    container = all_containers.nth(i)
-                    text = container.inner_text()
+                    # Get the text content regardless of visibility
+                    text = tbl.inner_text()
+                    log(f"[DEBUG] Table {i} text length: {len(text)}")
                     
-                    # Skip if too short
+                    # Skip tables that are too small (under 100 chars can't be a session table)
                     if len(text) < 100:
+                        log(f"[DEBUG] Table {i} too small, skipping")
                         continue
                     
-                    # Check if contains title and dates/times
-                    if title.lower() in text.lower():
-                        dates, times = extract_dates_times(text)
-                        if dates or times:
-                            log(f"[DEBUG] ✓ Container {i} has title and dates/times!")
-                            log(f"[DEBUG] Preview: {text[:400]}")
-                            sessions.append({"dates": dates or ["n/a"], "times": times or ["n/a"]})
+                    log(f"[DEBUG] Table {i} preview: {text[:200]}")
+                    
+                    # Check if this table has session headers (SESSION, DATES, TIMES columns)
+                    text_upper = text.upper()
+                    has_session_col = "SESSION" in text_upper
+                    has_dates_col = "DATES" in text_upper or "DATE" in text_upper
+                    has_times_col = "TIMES" in text_upper or "TIME" in text_upper
+                    
+                    log(f"[DEBUG] Table {i} - SESSION:{has_session_col}, DATES:{has_dates_col}, TIMES:{has_times_col}")
+                    
+                    if has_dates_col and has_times_col:
+                        log(f"[DEBUG] ✓ Table {i} has session data columns!")
+                        
+                        # Verify it's actually our program by checking if title appears near this table
+                        # Get the parent container
+                        parent = tbl.locator("xpath=ancestor::*[self::div or self::section][1]")
+                        if parent.count() > 0:
+                            parent_text = parent.inner_text()
+                            if title.lower() not in parent_text.lower():
+                                log(f"[DEBUG] Table {i} doesn't belong to our program (title not in parent)")
+                                continue
+                        
+                        # Try to parse this table
+                        parsed = parse_table_by_headers(tbl)
+                        if parsed:
+                            log(f"[DEBUG] ✓ Successfully parsed {len(parsed)} sessions from table {i}")
+                            sessions.extend(parsed)
                             modal_found = True
                             break
-                except:
-                    continue
+                        else:
+                            log(f"[DEBUG] Table {i} has headers but parsing returned no sessions")
+                except Exception as e:
+                    log(f"[DEBUG] Error checking table {i}: {e}")
+        
+        # Strategy 3: Look for modal containers (but be VERY strict about what we accept)
+        if not modal_found:
+            log("[DEBUG] No table found, searching for modal containers")
+            
+            # Look for containers that likely represent a modal
+            modal_candidates = page.locator(
+                '[class*="modal"], [class*="dialog"], [class*="overlay"], '
+                '[role="dialog"], [aria-modal="true"]'
+            )
+            
+            log(f"[DEBUG] Found {modal_candidates.count()} modal-like containers")
+            
+            for i in range(modal_candidates.count()):
+                try:
+                    container = modal_candidates.nth(i)
+                    
+                    # Must be visible
+                    if not container.is_visible():
+                        continue
+                    
+                    text = container.inner_text()
+                    
+                    # Must contain the program title
+                    if title.lower() not in text.lower():
+                        log(f"[DEBUG] Modal candidate {i} doesn't contain title")
+                        continue
+                    
+                    # Must NOT be the navigation/filter panel (reject if it has "Filter" or "Cart" near the top)
+                    if "Clear All Filters" in text[:500] or "Log In with Email" in text[:500]:
+                        log(f"[DEBUG] Modal candidate {i} is navigation panel, rejecting")
+                        continue
+                    
+                    # Must have substantial session-related content
+                    if len(text) < 300:
+                        log(f"[DEBUG] Modal candidate {i} too short")
+                        continue
+                    
+                    log(f"[DEBUG] Modal candidate {i} looks promising, checking for dates/times")
+                    log(f"[DEBUG] Preview: {text[:500]}")
+                    
+                    dates, times = extract_dates_times(text)
+                    if dates and times and len(dates) > 0 and len(times) > 0:
+                        log(f"[DEBUG] ✓ Modal {i} has {len(dates)} dates and {len(times)} times")
+                        
+                        # Parse it properly - look for a table inside this modal
+                        tbl_in_modal = container.locator("table").first
+                        if tbl_in_modal.count() > 0:
+                            log(f"[DEBUG] Found table inside modal {i}, parsing...")
+                            parsed = parse_table_by_headers(tbl_in_modal)
+                            if parsed:
+                                sessions.extend(parsed)
+                                modal_found = True
+                                break
+                        
+                        # Fallback: manually pair dates with times
+                        if not modal_found:
+                            log(f"[DEBUG] No table in modal, using text extraction")
+                            sessions.append({"dates": dates, "times": times})
+                            modal_found = True
+                            break
+                except Exception as e:
+                    log(f"[DEBUG] Error with modal candidate {i}: {e}")
         
         if not modal_found:
-            log(f"[DEBUG] Modal/table not found for {title}")
+            log(f"[DEBUG] Could not find session data for {title}")
+            log(f"[DEBUG] This might mean:")
+            log(f"[DEBUG] - The modal didn't open (check if site detects headless mode)")
+            log(f"[DEBUG] - Session data loads in a way we haven't detected")
+            log(f"[DEBUG] - The program has no available sessions")
         
         if not modal_found:
             log(f"[DEBUG] Modal/table not found for {title}")
