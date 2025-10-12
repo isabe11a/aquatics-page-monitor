@@ -1,21 +1,17 @@
 name: Aquatics Page Monitor
-
 on:
   schedule:
     - cron: "0 14 * * *"   # ~7:00 AM PT most of the year, 6:00 AM in winter
   #schedule:
   #  - cron: "*/5 * * * *"   # every 5 minutes while testing; switch to daily later
   workflow_dispatch:
-
 # Needed so the workflow can push baseline.json
 permissions:
   contents: write
-
 # Prevent overlapping runs from colliding
 concurrency:
   group: aquatics-monitor
   cancel-in-progress: true
-
 jobs:
   run:
     runs-on: ubuntu-latest
@@ -23,30 +19,26 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-
       # Sync before anything modifies baseline.json
       - name: Sync with remote
         run: |
           git fetch origin
           git checkout ${{ github.ref_name }}
           git pull --rebase origin ${{ github.ref_name }}
-
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-
       - name: Install Playwright
         run: |
           python -m pip install -r requirements.txt
           python -m playwright install --with-deps chromium
-
       # Run the monitor; capture its output even if it exits 1 on change
       - name: Run monitor
         id: monitor
         continue-on-error: true
         run: |
+          set -o pipefail
           python monitor.py | tee report.txt
-
       - name: Commit updated baseline
         if: always()
         run: |
@@ -55,7 +47,6 @@ jobs:
           git add baseline.json
           git commit -m "Update baseline [skip ci]" || echo "No changes"
           git push
-
       # Always email the report (subject reflects diff/no-diff)
       - name: Send email alert (always)
         if: always()
@@ -72,11 +63,9 @@ jobs:
             Outcome: ${{ steps.monitor.outcome == 'failure' && 'CHANGE detected' || 'No change' }}
             Repo:    ${{ github.repository }}
             Run:     ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-
             Report:
             (See attached report.txt or the 'Run monitor' step logs.)
           attachments: report.txt
-
       # Re-fail the job if a change was detected (keeps the red signal + native GitHub alert)
       - name: Mark job failed if change detected
         if: steps.monitor.outcome == 'failure'
