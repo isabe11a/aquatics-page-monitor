@@ -1,10 +1,10 @@
 name: Aquatics Page Monitor
 
 on:
-  #schedule:
-  #  - cron: "0 14 * * *"   # ~7:00 AM PT most of the year, 6:00 AM in winter
   schedule:
-    - cron: "*/5 * * * *"   # every 5 minutes while testing; switch to daily later
+    - cron: "0 14 * * *"   # ~7:00 AM PT most of the year, 6:00 AM in winter
+  #schedule:
+  #  - cron: "*/5 * * * *"   # every 5 minutes while testing; switch to daily later
   workflow_dispatch:
 
 # Needed so the workflow can push baseline.json
