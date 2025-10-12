@@ -104,57 +104,85 @@ def list_sessions_for_item(page, title):
         pass
 
     def parse_table_by_headers(tbl):
-        out = []
-        # ensure rendered
-        try:
-            tbl.wait_for(state="visible", timeout=5000)
-        except Exception:
-            pass
+    out = []
+    # ensure rendered
+    try:
+        tbl.wait_for(state="visible", timeout=5000)
+    except Exception:
+        pass
 
-        # find header indices
-        ths = tbl.locator("thead tr th")
-        dates_col = times_col = None
-        if ths.count() > 0:
-            for i in range(ths.count()):
-                h = (ths.nth(i).inner_text() or "").strip().lower()
-                if "date" in h and dates_col is None:
-                    dates_col = i
-                if ("time" in h or "times" in h) and times_col is None:
-                    times_col = i
-        else:
-            # fallback: use first row as header
-            first = tbl.locator("tr").first.locator("th,td")
-            for i in range(first.count()):
-                h = (first.nth(i).inner_text() or "").strip().lower()
-                if "date" in h and dates_col is None:
-                    dates_col = i
-                if ("time" in h or "times" in h) and times_col is None:
-                    times_col = i
+    # --- log headers we actually see ---
+    try:
+        ths_dbg = [ (tbl.locator("thead tr th").nth(i).inner_text() or "").strip()
+                    for i in range(tbl.locator("thead tr th").count()) ]
+        log(f"header cells: {ths_dbg}")
+    except Exception:
+        pass
 
-        # rows
-        rows = tbl.locator("tbody tr")
-        if rows.count() == 0:
-            # no <tbody> -> use all rows after first
-            all_rows = tbl.locator("tr")
+    # find header indices
+    ths = tbl.locator("thead tr th")
+    dates_col = times_col = None
+    if ths.count() > 0:
+        for i in range(ths.count()):
+            h = (ths.nth(i).inner_text() or "").strip().lower()
+            if "date" in h and dates_col is None:
+                dates_col = i
+            if ("time" in h or "times" in h) and times_col is None:
+                times_col = i
+    else:
+        # fallback: use first row as header
+        first = tbl.locator("tr").first.locator("th,td")
+        for i in range(first.count()):
+            h = (first.nth(i).inner_text() or "").strip().lower()
+            if "date" in h and dates_col is None:
+                dates_col = i
+            if ("time" in h or "times" in h) and times_col is None:
+                times_col = i
+
+    # --- hard fallback to CivicRec defaults if still unknown ---
+    # CivicRec sessions table is commonly:
+    # SESSION | LOCATION | AGE | DAYS | DATES | TIMES | FEES | AVAILABILITY | ADD TO CART
+    if dates_col is None:
+        dates_col = 4
+        log("dates_col not found by header; falling back to index 4")
+    if times_col is None:
+        times_col = 5
+        log("times_col not found by header; falling back to index 5")
+
+    # rows
+    rows = tbl.locator("tbody tr")
+    if rows.count() == 0:
+        # no <tbody> -> use all rows after first
+        all_rows = tbl.locator("tr")
+        if all_rows.count() > 1:
             rows = all_rows.nth(1)
+        else:
+            rows = tbl.locator("tr")  # last ditch
 
-        def cell_text(row, col_idx):
-            if col_idx is None:
-                return ""
-            return (row.locator(f"td:nth-child({col_idx+1})").inner_text() or "").strip()
+    # debug: first row text
+    try:
+        if rows.count() > 0:
+            log(f"first data row: {(rows.nth(0).inner_text() or '').strip()[:200]}")
+    except Exception:
+        pass
 
-        # iterate
-        count = rows.count() if hasattr(rows, "count") else 0
-        for i in range(count):
-            r = rows.nth(i)
-            dates_txt = cell_text(r, dates_col)
-            times_txt = cell_text(r, times_col)
-            d_dates, d_times = extract_dates_times(f"{dates_txt} {times_txt}")
-            out.append({
-                "dates": d_dates or ["n/a"],
-                "times": d_times or ["n/a"],
-            })
-        return out
+    def cell_text(row, col_idx):
+        if col_idx is None:
+            return ""
+        return (row.locator(f"td:nth-child({col_idx+1})").inner_text() or "").strip()
+
+    # iterate
+    count = rows.count() if hasattr(rows, "count") else 0
+    for i in range(count):
+        r = rows.nth(i)
+        dates_txt = cell_text(r, dates_col)
+        times_txt = cell_text(r, times_col)
+        d_dates, d_times = extract_dates_times(f"{dates_txt} {times_txt}")
+        out.append({
+            "dates": d_dates or ["n/a"],
+            "times": d_times or ["n/a"],
+        })
+    return out
 
     # ---------- 1) Next table in same document ----------
     next_table = heading.locator("xpath=following::table[1]").first
