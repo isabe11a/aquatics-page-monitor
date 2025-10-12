@@ -409,13 +409,19 @@ def main():
         print(report, flush=True)
         save_baseline({"items": items, "last_updated": datetime.utcnow().isoformat()})
         
-        # Exit 1 if changes detected (triggers workflow alert)
-        if added or removed or changed:
+        # Exit 1 ONLY when actual changes detected
+        has_changes = bool(added or removed or changed)
+        if has_changes:
+            print("\n[EXIT CODE 1: Changes detected]", flush=True)
             sys.exit(1)
+        else:
+            print("\n[EXIT CODE 0: No changes]", flush=True)
+            sys.exit(0)
     except Exception as e:
         print("### Aquatics Monitor - ERROR\n\n" + str(e), flush=True)
         import traceback
         print("\n" + traceback.format_exc(), flush=True)
+        print("\n[EXIT CODE 0: Error occurred]", flush=True)
         sys.exit(0)
 
 if __name__ == "__main__":
