@@ -1,7 +1,7 @@
 name: Aquatics Page Monitor
 on:
   schedule:
-    - cron: "*/5 * * * *"   # Every 5 minutes
+    - cron: "*/15 * * * *"   # Every 15 minutes
   workflow_dispatch:
 # Needed so the workflow can push baseline.json
 permissions:
