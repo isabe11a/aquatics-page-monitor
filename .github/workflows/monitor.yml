@@ -24,6 +24,12 @@ jobs:
         with:
           fetch-depth: 0
 
+      - name: Sync with remote
+        run: |
+          git fetch origin
+          git checkout ${{ github.ref_name }}
+          git pull --rebase origin ${{ github.ref_name }}
+
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
@@ -74,7 +80,6 @@ jobs:
           password: ${{ secrets.MAIL_PASSWORD }}
           to: ${{ secrets.MAIL_TO }}
           from: "Aquatics Bot <${{ secrets.MAIL_USERNAME }}>"
-          content_type: text/plain
           subject: "${{ steps.monitor.outcome == 'failure' && 'Aquatics monitor: CHANGE detected' || 'Aquatics monitor: no change' }}"
           body: |
             Outcome: ${{ steps.monitor.outcome == 'failure' && 'CHANGE detected' || 'No change' }}
