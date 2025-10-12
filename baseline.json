@@ -2,21 +2,8 @@
   "items": [
     {
       "title": "Swim Lesson Level 1: Baby Pups & Parent Seals",
-      "url": "javascript:void(0);",
-      "sessions": [
-        {
-          "dates": [
-            "09/13-10/11",
-            "10/06-10/16"
-          ],
-          "times": [
-            "10:00AM",
-            "10:25am",
-            "5:00PM",
-            "5:25pm"
-          ]
-        }
-      ]
+      "url": null,
+      "sessions": []
     },
     {
       "title": "Swim Lesson Level 2: Sea Horses",
@@ -24,5 +11,5 @@
       "sessions": []
     }
   ],
-  "last_updated": "2025-10-12T04:26:26.806728"
+  "last_updated": "2025-10-12T04:34:56.804010"
 }
