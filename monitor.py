@@ -142,56 +142,87 @@ def get_catalog_frame(page):
     return page
 
 def list_sessions_for_item(page, title):
-    """Return a normalized sessions list for a given item (list of dicts with dates/times)."""
-    click_item_by_title(page, title)
-    frame = get_catalog_frame(page)
+    """
+    Clicks the title. If it expands inline (href=javascript:void(0)),
+    parse the nearest visible sessions table. If it navigates, fall back
+    to the old frame/table logic. Always returns a sorted list of sessions.
+    """
+    # Find the anchor (page or any iframe), then click it
+    link = _find_anchor_anywhere(page, title)
+    if link is None or link.count() == 0:
+        # Not found at all
+        return []
 
-    # Prefer a structured table with Dates/Time headers
-    table = frame.locator("table:has(th:has-text('Dates')), table:has(th:has-text('Time'))")
+    href = (link.first.get_attribute("href") or "").strip()
+    link.first.click(timeout=5000)
+    page.wait_for_timeout(900)  # let the panel expand or route change
+
     sessions = []
 
-    if table.count() > 0:
-        # Grab all rows under table body (fallback to all <tr> if needed)
-        rows = table.locator("tbody tr")
-        if rows.count() == 0:
-            rows = table.locator("tr").nth(1)  # skip header if no <tbody>
-        # Ensure rows is iterable
-        try:
-            row_count = rows.count()
-        except:
-            row_count = 0
+    # Case A: inline expansion (typical -> href "javascript:void(0)")
+    if href.startswith("javascript"):
+        # Prefer a visible table with Dates/Time headers
+        table = page.locator("table:visible:has(th:has-text('Dates')), table:visible:has(th:has-text('Time'))").first
+        if table.count() == 0:
+            # Sometimes the expanded content is rendered in an iframe inside the panel
+            for f in page.frames:
+                try:
+                    if "secure.rec1.com" not in (f.url or ""):
+                        continue
+                except Exception:
+                    continue
+                cand = f.locator("table:visible:has(th:has-text('Dates')), table:visible:has(th:has-text('Time'))").first
+                if cand.count() > 0:
+                    table = cand
+                    break
 
-        for i in range(row_count):
-            r = rows.nth(i)
-            row_text = r.inner_text()
-            dates, times = extract_dates_times(row_text)
-            # Normalize a session representation
-            sessions.append({
-                "dates": dates or ["n/a"],
-                "times": times or ["n/a"],
-            })
-    else:
-        # Fallback: scrape entire visible pane
-        body = frame.locator("body")
-        if body.count() == 0:
+        if table.count() > 0:
+            rows = table.locator("tbody tr")
+            if rows.count() == 0:
+                rows = table.locator("tr").nth(1)  # skip header if no <tbody>
+            for i in range(rows.count()):
+                r = rows.nth(i)
+                row_text = r.inner_text()
+                dates, times = extract_dates_times(row_text)
+                sessions.append({"dates": dates or ["n/a"], "times": times or ["n/a"]})
+        else:
+            # Fallback: grab text from the expanded region
             body = page.locator("body")
-        dates, times = extract_dates_times(body.inner_text())
-        # Treat as a single session when only free text is available
-        sessions.append({
-            "dates": dates or ["n/a"],
-            "times": times or ["n/a"],
-        })
+            dates, times = extract_dates_times(body.inner_text())
+            sessions.append({"dates": dates or ["n/a"], "times": times or ["n/a"]})
 
-    # Go back to the listing page for the next item
-    page.go_back(wait_until="domcontentloaded")
-    page.wait_for_timeout(800)
+        # No navigation happened; stay on the list page (no go_back)
 
-    # Sort sessions for stable diffs
+    else:
+        # Case B: navigation to a detail page/route (older deployments)
+        frame = get_catalog_frame(page)
+        table = frame.locator("table:has(th:has-text('Dates')), table:has(th:has-text('Time'))")
+        if table.count() > 0:
+            rows = table.locator("tbody tr")
+            if rows.count() == 0:
+                rows = table.locator("tr").nth(1)
+            for i in range(rows.count()):
+                r = rows.nth(i)
+                row_text = r.inner_text()
+                dates, times = extract_dates_times(row_text)
+                sessions.append({"dates": dates or ["n/a"], "times": times or ["n/a"]})
+        else:
+            body = frame.locator("body")
+            if body.count() == 0:
+                body = page.locator("body")
+            dates, times = extract_dates_times(body.inner_text())
+            sessions.append({"dates": dates or ["n/a"], "times": times or ["n/a"]})
+
+        # Go back to listing for next item
+        page.go_back(wait_until="domcontentloaded")
+        page.wait_for_timeout(700)
+
+    # Stable sort for diffs
     sessions.sort(key=lambda s: (";".join(s["dates"]), ";".join(s["times"])))
     return sessions
 
 def get_items_with_sessions():
-    """Return only the two target items with title, url, and sessions (dates+times)."""
+    """Return only the two target items with title, url (or tag), and sessions."""
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
         ctx = browser.new_context()
@@ -199,30 +230,26 @@ def get_items_with_sessions():
 
         open_aquatics(page)
 
-        # Find candidate anchors for our two titles
         items = []
         for title in TARGET_TITLES:
-            # Find the anchor to capture a stable URL
-            link = page.get_by_role("link", name=title, exact=True)
-            if link.count() == 0:
-                link = page.get_by_role("link", name=re.compile(re.escape(title), re.I))
+            # Try to get a stable identifier
+            link = _find_anchor_anywhere(page, title)
+            url = None
+            if link and link.count() > 0:
+                href = (link.first.get_attribute("href") or "").strip()
+                if href.startswith("http"):
+                    url = href
+                elif href.startswith("/"):
+                    url = f"https://secure.rec1.com{href}"
+                elif href.startswith("javascript"):
+                    # Inline expansion; fabricate a stable tag so diffs include context
+                    url = "inline:" + re.sub(r"[^a-z0-9]+", "-", title.lower()).strip("-")
 
-            if link.count() == 0:
-                # Not present at all in the list right now
-                items.append({"title": title, "url": None, "sessions": []})
-                continue
-
-            href = link.first.get_attribute("href") or ""
-            full_url = href if href.startswith("http") else f"https://secure.rec1.com{href}" if href.startswith("/") else href
-
-            # Open and extract sessions
             sessions = list_sessions_for_item(page, title)
-
-            items.append({"title": title, "url": full_url, "sessions": sessions})
+            items.append({"title": title, "url": url, "sessions": sessions})
 
         browser.close()
 
-    # Sort by title for a stable order
     items.sort(key=lambda x: (x["title"].lower(), x["url"] or ""))
     return items
 
