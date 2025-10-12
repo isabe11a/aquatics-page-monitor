@@ -225,6 +225,28 @@ def list_sessions_for_item(page, title):
                 except:
                     pass
         
+        # STRATEGY 4: Text-based fallback - extract dates/times from page body
+        # The modal may render content that's visible but not in a proper table/iframe
+        if not modal_found:
+            try:
+                body_text = page.locator("body").inner_text()
+                # Find the position of our title in the text
+                title_lower = title.lower()
+                title_pos = body_text.lower().find(title_lower)
+                
+                if title_pos >= 0:
+                    # Get a reasonable chunk of text after the title (next 1000 chars)
+                    context = body_text[title_pos:title_pos + 1000]
+                    dates, times = extract_dates_times(context)
+                    
+                    # Only accept if we found actual session dates/times
+                    # (filter out navigation menu dates)
+                    if dates and times and len(dates) <= 10 and len(times) <= 20:
+                        sessions.append({"dates": dates, "times": times})
+                        modal_found = True
+            except:
+                pass
+        
         # Close modal
         try:
             page.keyboard.press("Escape")
