@@ -4,12 +4,14 @@ on:
   #schedule:
   #  - cron: "0 14 * * *"   # ~7:00 AM PT most of the year, 6:00 AM in winter
   schedule:
-    - cron: "*/5 * * * *"   # testing cadence; switch to daily later
+    - cron: "*/5 * * * *"   # every 5 minutes while testing; switch to daily later
   workflow_dispatch:
 
+# Needed so the workflow can push baseline.json
 permissions:
   contents: write
 
+# Prevent overlapping runs from colliding
 concurrency:
   group: aquatics-monitor
   cancel-in-progress: true
@@ -31,23 +33,37 @@ jobs:
           python -m pip install -r requirements.txt
           python -m playwright install --with-deps chromium
 
-      # 1) Run monitor, capture report, but don't stop the job on exit 1
+      # Run the monitor; capture its output even if it exits 1 on change
       - name: Run monitor
         id: monitor
         continue-on-error: true
         run: |
           python monitor.py | tee report.txt
 
+      # Sync with remote to avoid non-fast-forward push errors
+      - name: Sync with remote
+        if: always()
+        run: |
+          git fetch origin
+          git checkout ${{ github.ref_name }}
+          git pull --rebase origin ${{ github.ref_name }}
+
+      # Commit/push updated baseline (if changed)
       - name: Commit updated baseline
         if: always()
         run: |
-          git config user.name "${{ secrets.GIT_USER_NAME }}"
+          git config user.name "aquatics-bot"
           git config user.email "${{ secrets.GIT_USER_EMAIL }}"
           git add baseline.json
           git commit -m "Update baseline [skip ci]" || echo "No changes"
-          git push
+          # Push with a couple retries in case of a race
+          for i in 1 2 3; do
+            git push && break
+            echo "Push failed, retrying..."; sleep 3
+            git pull --rebase origin ${{ github.ref_name }}
+          done
 
-      # 2) Always send an email. Subject reflects whether a diff was found.
+      # Always email the report (subject reflects diff/no-diff)
       - name: Send email alert (always)
         if: always()
         uses: dawidd6/action-send-mail@v3
@@ -59,17 +75,17 @@ jobs:
           to: ${{ secrets.MAIL_TO }}
           from: "Aquatics Bot <${{ secrets.MAIL_USERNAME }}>"
           content_type: text/plain
-          subject: ${{ steps.monitor.outcome == 'failure' && 'Aquatics monitor: CHANGE detected' || 'Aquatics monitor: no change' }}
+          subject: "${{ steps.monitor.outcome == 'failure' && 'Aquatics monitor: CHANGE detected' || 'Aquatics monitor: no change' }}"
           body: |
             Outcome: ${{ steps.monitor.outcome == 'failure' && 'CHANGE detected' || 'No change' }}
             Repo:    ${{ github.repository }}
             Run:     ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
 
             Report:
-            (See attached report.txt or the "Run monitor" step logs.)
+            (See attached report.txt or the 'Run monitor' step logs.)
           attachments: report.txt
 
-      # 3) If monitor exited non-zero (diff), re-fail the job to keep red status/alerts
+      # Re-fail the job if a change was detected (keeps the red signal + native GitHub alert)
       - name: Mark job failed if change detected
         if: steps.monitor.outcome == 'failure'
         run: exit 1
