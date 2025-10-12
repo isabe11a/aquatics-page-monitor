@@ -1,9 +1,7 @@
 name: Aquatics Page Monitor
 on:
   schedule:
-    - cron: "0 14 * * *"   # ~7:00 AM PT most of the year, 6:00 AM in winter
-  #schedule:
-  #  - cron: "*/5 * * * *"   # every 5 minutes while testing; switch to daily later
+    - cron: "*/5 * * * *"   # Every 5 minutes
   workflow_dispatch:
 # Needed so the workflow can push baseline.json
 permissions:
@@ -39,6 +37,18 @@ jobs:
         run: |
           set -o pipefail
           python monitor.py | tee report.txt
+      
+      # Check if this is the 7am PT run (14:00 UTC hour)
+      - name: Check if daily report time
+        id: check_time
+        run: |
+          current_hour=$(date -u +%H)
+          if [ "$current_hour" == "14" ]; then
+            echo "is_daily_time=true" >> $GITHUB_OUTPUT
+          else
+            echo "is_daily_time=false" >> $GITHUB_OUTPUT
+          fi
+      
       - name: Commit updated baseline
         if: always()
         run: |
@@ -47,9 +57,10 @@ jobs:
           git add baseline.json
           git commit -m "Update baseline [skip ci]" || echo "No changes"
           git push
-      # Always email the report (subject reflects diff/no-diff)
-      - name: Send email alert (always)
-        if: always()
+      
+      # Send email if: (1) changes detected OR (2) it's 7am daily report time
+      - name: Send email alert
+        if: always() && (steps.monitor.outcome == 'failure' || steps.check_time.outputs.is_daily_time == 'true')
         uses: dawidd6/action-send-mail@v3
         with:
           server_address: ${{ secrets.SMTP_SERVER }}
@@ -58,7 +69,7 @@ jobs:
           password: ${{ secrets.MAIL_PASSWORD }}
           to: ${{ secrets.MAIL_TO }}
           from: "Aquatics Bot <${{ secrets.MAIL_USERNAME }}>"
-          subject: "${{ steps.monitor.outcome == 'failure' && 'Aquatics monitor: CHANGE detected' || 'Aquatics monitor: no change' }}"
+          subject: "${{ steps.monitor.outcome == 'failure' && '🏊 Aquatics monitor: CHANGE detected!' || 'Aquatics monitor: daily report' }}"
           body: |
             Outcome: ${{ steps.monitor.outcome == 'failure' && 'CHANGE detected' || 'No change' }}
             Repo:    ${{ github.repository }}
@@ -66,6 +77,7 @@ jobs:
             Report:
             (See attached report.txt or the 'Run monitor' step logs.)
           attachments: report.txt
+      
       # Re-fail the job if a change was detected (keeps the red signal + native GitHub alert)
       - name: Mark job failed if change detected
         if: steps.monitor.outcome == 'failure'
