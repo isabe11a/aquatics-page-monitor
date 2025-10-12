@@ -1,11 +1,14 @@
-name: Calabasas Aquatics Monitor
+name: Aquatics Page Monitor
 
 on:
   #schedule:
   #  - cron: "0 14 * * *"   # ~7:00 AM PT most of the year, 6:00 AM in winter
   schedule:
-    - cron: "*/5 * * * *"   # every 5 minutes (UTC)
+    - cron: "*/5 * * * *"   # testing cadence; switch to daily later
   workflow_dispatch:
+
+permissions:
+  contents: write
 
 concurrency:
   group: aquatics-monitor
@@ -28,8 +31,12 @@ jobs:
           python -m pip install -r requirements.txt
           python -m playwright install --with-deps chromium
 
+      # 1) Run monitor, capture report, but don't stop the job on exit 1
       - name: Run monitor
-        run: python monitor.py
+        id: monitor
+        continue-on-error: true
+        run: |
+          python monitor.py | tee report.txt
 
       - name: Commit updated baseline
         if: always()
@@ -39,3 +46,30 @@ jobs:
           git add baseline.json
           git commit -m "Update baseline [skip ci]" || echo "No changes"
           git push
+
+      # 2) Always send an email. Subject reflects whether a diff was found.
+      - name: Send email alert (always)
+        if: always()
+        uses: dawidd6/action-send-mail@v3
+        with:
+          server_address: ${{ secrets.SMTP_SERVER }}
+          server_port: ${{ secrets.SMTP_PORT }}
+          username: ${{ secrets.MAIL_USERNAME }}
+          password: ${{ secrets.MAIL_PASSWORD }}
+          to: ${{ secrets.MAIL_TO }}
+          from: "Aquatics Bot <${{ secrets.MAIL_USERNAME }}>"
+          content_type: text/plain
+          subject: ${{ steps.monitor.outcome == 'failure' && 'Aquatics monitor: CHANGE detected' || 'Aquatics monitor: no change' }}
+          body: |
+            Outcome: ${{ steps.monitor.outcome == 'failure' && 'CHANGE detected' || 'No change' }}
+            Repo:    ${{ github.repository }}
+            Run:     ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+
+            Report:
+            (See attached report.txt or the "Run monitor" step logs.)
+          attachments: report.txt
+
+      # 3) If monitor exited non-zero (diff), re-fail the job to keep red status/alerts
+      - name: Mark job failed if change detected
+        if: steps.monitor.outcome == 'failure'
+        run: exit 1
