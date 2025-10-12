@@ -1,7 +1,6 @@
 name: Calabasas Aquatics Monitor
 
 on:
-  on:
   #schedule:
   #  - cron: "0 14 * * *"   # ~7:00 AM PT most of the year, 6:00 AM in winter
   schedule:
