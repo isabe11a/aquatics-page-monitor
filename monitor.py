@@ -85,9 +85,9 @@ def _find_heading_anywhere(page, title):
 
 def list_sessions_for_item(page, title):
     """
-    Find the heading that contains `title`, then parse the first sessions table
+    Find the heading containing `title`, then parse the first sessions table
     that follows it (or the first table inside the next iframe). Dates/Times are
-    extracted by header index for reliability.
+    extracted by header index when possible, with safe fallbacks.
     """
     sessions = []
     heading = _find_heading_anywhere(page, title)
@@ -103,94 +103,109 @@ def list_sessions_for_item(page, title):
     except Exception:
         pass
 
-def parse_table_by_headers(tbl):
-    out = []
-    # ensure rendered
-    try:
-        tbl.wait_for(state="visible", timeout=5000)
-    except Exception:
-        pass
+    def parse_table_safely(tbl):
+        out = []
+        try:
+            try:
+                tbl.wait_for(state="visible", timeout=5000)
+            except Exception:
+                pass
 
-    # --- log headers we actually see ---
-    try:
-        ths_dbg = [ (tbl.locator("thead tr th").nth(i).inner_text() or "").strip()
-                    for i in range(tbl.locator("thead tr th").count()) ]
-        log(f"header cells: {ths_dbg}")
-    except Exception:
-        pass
+            # ---- Inspect headers (log for debugging) ----
+            head_loc = tbl.locator("thead tr th")
+            head_count = head_loc.count()
+            headers = []
+            for i in range(head_count):
+                try:
+                    headers.append((head_loc.nth(i).inner_text() or "").strip())
+                except Exception:
+                    headers.append("")
+            if headers:
+                log(f"header cells: {headers}")
 
-    # find header indices
-    ths = tbl.locator("thead tr th")
-    dates_col = times_col = None
-    if ths.count() > 0:
-        for i in range(ths.count()):
-            h = (ths.nth(i).inner_text() or "").strip().lower()
-            if "date" in h and dates_col is None:
-                dates_col = i
-            if ("time" in h or "times" in h) and times_col is None:
-                times_col = i
-    else:
-        # fallback: use first row as header
-        first = tbl.locator("tr").first.locator("th,td")
-        for i in range(first.count()):
-            h = (first.nth(i).inner_text() or "").strip().lower()
-            if "date" in h and dates_col is None:
-                dates_col = i
-            if ("time" in h or "times" in h) and times_col is None:
-                times_col = i
+            # ---- Determine Dates / Times column indices ----
+            dates_col = times_col = None
+            if head_count > 0:
+                for i, h in enumerate([h.lower() for h in headers]):
+                    if "date" in h and dates_col is None:
+                        dates_col = i
+                    if ("time" in h or "times" in h) and times_col is None:
+                        times_col = i
+            else:
+                # First row as header fallback
+                first = tbl.locator("tr").first.locator("th,td")
+                first_n = first.count()
+                for i in range(first_n):
+                    h = (first.nth(i).inner_text() or "").strip().lower()
+                    if "date" in h and dates_col is None:
+                        dates_col = i
+                    if ("time" in h or "times" in h) and times_col is None:
+                        times_col = i
 
-    # --- hard fallback to CivicRec defaults if still unknown ---
-    # CivicRec sessions table is commonly:
-    # SESSION | LOCATION | AGE | DAYS | DATES | TIMES | FEES | AVAILABILITY | ADD TO CART
-    if dates_col is None:
-        dates_col = 4
-        log("dates_col not found by header; falling back to index 4")
-    if times_col is None:
-        times_col = 5
-        log("times_col not found by header; falling back to index 5")
+            # Hard fallback to common CivicRec positions (0-based)
+            if dates_col is None:
+                dates_col = 4
+                log("dates_col not found by header; falling back to index 4")
+            if times_col is None:
+                times_col = 5
+                log("times_col not found by header; falling back to index 5")
 
-    # rows
-    rows = tbl.locator("tbody tr")
-    if rows.count() == 0:
-        # no <tbody> -> use all rows after first
-        all_rows = tbl.locator("tr")
-        if all_rows.count() > 1:
-            rows = all_rows.nth(1)
-        else:
-            rows = tbl.locator("tr")  # last ditch
+            # ---- Get data rows robustly ----
+            rows = tbl.locator("tbody tr")
+            n = rows.count()
+            if n == 0:
+                # Any TR without TH (skip header rows)
+                rows = tbl.locator("tr").filter(has_not=tbl.locator("th"))
+                n = rows.count()
 
-    # debug: first row text
-    try:
-        if rows.count() > 0:
-            log(f"first data row: {(rows.nth(0).inner_text() or '').strip()[:200]}")
-    except Exception:
-        pass
+            if n == 0:
+                log("no data rows found in table")
+                return out
 
-    def cell_text(row, col_idx):
-        if col_idx is None:
-            return ""
-        return (row.locator(f"td:nth-child({col_idx+1})").inner_text() or "").strip()
+            # helper: read a cell safely
+            def cell_text(row_loc, col_idx):
+                if col_idx is None:
+                    return ""
+                # nth-child is 1-based
+                try:
+                    return (row_loc.locator(f"td:nth-child({col_idx+1})").inner_text() or "").strip()
+                except Exception:
+                    return ""
 
-    # iterate
-    count = rows.count() if hasattr(rows, "count") else 0
-    for i in range(count):
-        r = rows.nth(i)
-        dates_txt = cell_text(r, dates_col)
-        times_txt = cell_text(r, times_col)
-        d_dates, d_times = extract_dates_times(f"{dates_txt} {times_txt}")
-        out.append({
-            "dates": d_dates or ["n/a"],
-            "times": d_times or ["n/a"],
-        })
-    return out
+            # iterate rows
+            for i in range(n):
+                r = rows.nth(i)
+                try:
+                    dates_txt = cell_text(r, dates_col)
+                    times_txt = cell_text(r, times_col)
+                    if not dates_txt and not times_txt:
+                        # fallback: whole row text
+                        row_all = (r.inner_text() or "").strip()
+                        d_dates, d_times = extract_dates_times(row_all)
+                    else:
+                        d_dates, d_times = extract_dates_times(f"{dates_txt} {times_txt}")
+                    # Only append if something real was found
+                    if d_dates or d_times:
+                        out.append({
+                            "dates": d_dates or ["n/a"],
+                            "times": d_times or ["n/a"],
+                        })
+                except Exception as e:
+                    log(f"row parse error: {e}")
+                    continue
+
+        except Exception as e:
+            log(f"parse_table_safely error: {e}")
+        return out
 
     # ---------- 1) Next table in same document ----------
     next_table = heading.locator("xpath=following::table[1]").first
     if next_table.count() > 0 and next_table.is_visible():
         log(f"next table found for {title} (same doc)")
-        sessions = parse_table_by_headers(next_table)
-        sessions.sort(key=lambda s: (";".join(s["dates"]), ";".join(s["times"])))
-        return sessions
+        parsed = parse_table_safely(next_table)
+        if parsed:
+            parsed.sort(key=lambda s: (";".join(s["dates"]), ";".join(s["times"])))
+            return parsed
 
     # ---------- 2) Next iframe after heading -> first table inside ----------
     next_iframe = heading.locator("xpath=following::iframe[1]").first
@@ -207,9 +222,10 @@ def parse_table_by_headers(tbl):
             if tbl.count() == 0:
                 tbl = fr.locator("table").first
             if tbl.count() > 0:
-                sessions = parse_table_by_headers(tbl)
-                sessions.sort(key=lambda s: (";".join(s["dates"]), ";".join(s["times"])))
-                return sessions
+                parsed = parse_table_safely(tbl)
+                if parsed:
+                    parsed.sort(key=lambda s: (";".join(s["dates"]), ";".join(s["times"])))
+                    return parsed
 
     # ---------- 3) Last resort: nearby text ----------
     try:
@@ -218,9 +234,12 @@ def parse_table_by_headers(tbl):
     except Exception:
         txt = page.locator("body").inner_text()
     d, t = extract_dates_times(txt)
-    sessions.append({"dates": d or ["n/a"], "times": t or ["n/a"]})
+    if d or t:
+        sessions.append({"dates": d or ["n/a"], "times": t or ["n/a"]})
+    # If we found nothing at all, return [] so _has_real_sessions treats it as absent
     sessions.sort(key=lambda s: (";".join(s["dates"]), ";".join(s["times"])))
     return sessions
+
 
 def get_items_with_sessions():
     with sync_playwright() as p:
