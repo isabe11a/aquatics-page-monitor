@@ -83,6 +83,68 @@ def _find_heading_anywhere(page, title):
     log(f"heading NOT found: {title}")
     return None
 
+def _find_detail_url_by_title(page, title):
+    """
+    Search the main page and all civicrec iframes for a REAL detail URL
+    (e.g., /catalog/item/...) whose link or surrounding container mentions `title`.
+    Returns an absolute URL or None.
+    """
+    def normalize(u):
+        if not u:
+            return None
+        u = u.strip()
+        if not u or u.startswith("javascript"):
+            return None
+        if u.startswith("/"):
+            return f"https://secure.rec1.com{u}"
+        if u.startswith("http"):
+            return u
+        return None
+
+    # search in a given scope (page or frame)
+    def search_scope(scope):
+        anchors = scope.locator('a[href*="/catalog/item/"]').all()
+        # broader: sometimes it's "/programs/" or similar
+        anchors += scope.locator('a[href*="/program"]').all()
+        for a in anchors:
+            try:
+                href = normalize(a.get_attribute("href"))
+            except Exception:
+                href = None
+            if not href:
+                continue
+            # check the link text first
+            txt = (a.inner_text() or "").strip()
+            if txt and title.lower() in txt.lower():
+                return href
+            # otherwise, check a nearby container’s text
+            try:
+                cont = a.locator("xpath=ancestor::*[self::div or self::section or self::li][1]")
+                ctxt = (cont.inner_text() or "").strip()
+            except Exception:
+                ctxt = ""
+            if ctxt and title.lower() in ctxt.lower():
+                return href
+        return None
+
+    # 1) main page
+    url = search_scope(page)
+    if url:
+        return url
+
+    # 2) civicrec iframes
+    for f in page.frames:
+        try:
+            if "secure.rec1.com" not in (f.url or ""):
+                continue
+        except Exception:
+            continue
+        url = search_scope(f)
+        if url:
+            return url
+
+    return None
+
 def parse_table_by_headers(tbl):
     """
     Parse a plain HTML table that has session data. Finds the Dates/Times columns
@@ -202,6 +264,19 @@ def parse_aria_grid(scope):
 
     return sessions
 
+def parse_detail_page_fallback(scope):
+    """
+    Last-resort parser for detail pages: scan visible text for MM/DD–MM/DD and times.
+    """
+    try:
+        txt = scope.locator("body").inner_text()
+    except Exception:
+        return []
+    d_dates, d_times = extract_dates_times(txt)
+    if d_dates or d_times:
+        return [{"dates": d_dates or ["n/a"], "times": d_times or ["n/a"]}]
+    return []
+
 def _wait_for_sessions_region(page, heading, timeout=4000):
     """
     After clicking the heading, wait for a sessions region to appear:
@@ -262,94 +337,58 @@ def _find_card_for_heading(scope, heading):
 
 def list_sessions_for_item(page, title):
     """
-    Expand the title, open its dedicated detail page link from within the card,
-    parse sessions there (table or ARIA grid), then return to the list.
+    Resolve a REAL detail page URL for `title` anywhere on the page/frames,
+    open it, parse sessions there, then go back.
     """
     sessions = []
 
-    # Find the heading on main page/iframes
-    heading = _find_heading_anywhere(page, title)
-    if not heading:
-        return sessions
+    # First, see if we can directly resolve a detail URL without expanding
+    detail_url = _find_detail_url_by_title(page, title)
 
-    # Always click to expand the card
-    try:
-        heading.click(timeout=2500)
-    except Exception:
-        pass
-    page.wait_for_timeout(400)
-
-    # Get the card container (near the heading)
-    card = _find_card_for_heading(page, heading)
-    if card.count() == 0:
-        return sessions  # bail out quietly; _has_real_sessions will treat as absent
-
-    # Find a REAL link within the card that goes to a detail page
-    # Common CivicRec patterns: /catalog/item/, /programs/, /details, "View Details", etc.
-    link = None
-    candidates = card.locator("a[href]").all()
-    for a in candidates:
-        try:
-            href = (a.get_attribute("href") or "").strip()
-        except Exception:
-            href = ""
-        txt = (a.inner_text() or "").strip().lower()
-        if not href:
-            continue
-        if href.startswith("javascript"):
-            continue
-        # heuristics: prefer known item URLs or links labeled like "view details"
-        if ("/catalog/item/" in href) or ("/program" in href) or ("details" in href) or ("view" in txt and "detail" in txt):
-            link = a
-            break
-    # If still none, take the first non-javascript link in the card
-    if not link and candidates:
-        for a in candidates:
+    # If not found, expand the card and try again (some links appear only when expanded)
+    if not detail_url:
+        heading = _find_heading_anywhere(page, title)
+        if heading:
             try:
-                href = (a.get_attribute("href") or "").strip()
+                heading.click(timeout=2500)
+                page.wait_for_timeout(400)
             except Exception:
-                href = ""
-            if href and not href.startswith("javascript"):
-                link = a
-                break
+                pass
+            detail_url = _find_detail_url_by_title(page, title)
 
-    if not link:
-        # last resort: try “the very next iframe” beneath heading (older logic)
-        next_iframe = heading.locator("xpath=following::iframe[1]").first
-        if next_iframe.count() > 0:
-            try:
-                handle = next_iframe.element_handle()
-                fr = handle.content_frame() if handle else None
+    if not detail_url:
+        # No real URL found; as a last resort, try the nearest following iframe approach you had before
+        heading = _find_heading_anywhere(page, title)
+        if heading:
+            next_iframe = heading.locator("xpath=following::iframe[1]").first
+            if next_iframe.count() > 0:
+                try:
+                    handle = next_iframe.element_handle()
+                    fr = handle.content_frame() if handle else None
+                except Exception:
+                    fr = None
                 if fr:
-                    # try table → grid inside the frame
                     tbl = fr.locator("table:has(th:has-text('Dates')), table:has(th:has-text('Time'))").first
                     if tbl.count() == 0:
                         tbl = fr.locator("table").first
+                    parsed = []
                     if tbl.count() > 0:
                         parsed = parse_table_by_headers(tbl)
-                        if parsed:
-                            sessions.extend(parsed)
-                    if not sessions:
+                    if not parsed:
                         grid = fr.locator('[role="grid"], [role="table"]').first
                         if grid.count() > 0:
-                            sessions.extend(parse_aria_grid(grid))
-                # Sort and return if anything found
-                if sessions:
-                    sessions.sort(key=lambda s: (";".join(s["dates"]), ";".join(s["times"])))
-                    return sessions
-            except Exception:
-                pass
-        return sessions  # nothing found
+                            parsed = parse_aria_grid(grid)
+                    if parsed:
+                        parsed.sort(key=lambda s: (";".join(s["dates"]), ";".join(s["times"])))
+                        return parsed
+        # Still nothing: give up quietly; _has_real_sessions will mark as absent
+        return sessions
 
-    # Open the detail page (resolve absolute URL)
-    href = (link.get_attribute("href") or "").strip()
-    if href.startswith("/"):
-        href = f"https://secure.rec1.com{href}"
-    log(f"opening detail: {href}")
-    page.goto(href, wait_until="domcontentloaded")
+    # Open the detail page and parse there
+    log(f"opening detail: {detail_url}")
+    page.goto(detail_url, wait_until="domcontentloaded")
     page.wait_for_timeout(600)
 
-    # Prefer a real table on the detail page, else ARIA grid
     parsed = []
     try:
         tbl = page.locator("table:has(th:has-text('Dates')), table:has(th:has-text('Time'))").first
@@ -361,6 +400,8 @@ def list_sessions_for_item(page, title):
             grid = page.locator('[role="grid"], [role="table"]').first
             if grid.count() > 0:
                 parsed = parse_aria_grid(grid)
+        if not parsed:
+            parsed = parse_detail_page_fallback(page)
     except Exception:
         parsed = []
 
