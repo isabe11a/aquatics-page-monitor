@@ -61,111 +61,97 @@ def open_aquatics(page):
         except:
             continue
 
-def _find_card_container(page, title):
+def _find_heading_anywhere(page, title):
     """
-    Find the DOM container (div/section/li) that contains the class title.
-    Works on the main page or in civicrec iframes. Returns a Locator or None.
+    Return a Locator for an element that visibly contains the title text.
+    Tries the main page first, then any civicrec iframes.
     """
-    def find_in(scope):
-        # match any element whose visible text contains the title (forgiving)
-        heading = scope.locator(f"xpath=//*[contains(normalize-space(.), {json.dumps(title)})]").first
-        if heading.count() == 0:
-            # try a relaxed match on the left part ("Swim Lesson Level 2")
-            key = title.split(":")[0].strip()
-            heading = scope.locator(f"xpath=//*[contains(normalize-space(.), {json.dumps(key)}) and contains(normalize-space(.), 'Swim')]").first
-        if heading.count() == 0:
-            return None
-        # climb to a reasonably small container (card/item)
-        container = heading.locator(
-            "xpath=ancestor::*[self::div or self::section or self::li][contains(@class,'item') or contains(@class,'card') or contains(@class,'program') or contains(@class,'accordion')][1]"
-        )
-        if container.count() == 0:
-            # fallback: nearest generic container
-            container = heading.locator("xpath=ancestor::*[self::div or self::section or self::li][1]")
-        return container if container.count() > 0 else None
+    # tolerant regex (ignore extra spaces/linebreaks)
+    pattern = re.compile(re.escape(title), re.I)
 
-    # 1) try on main page; scroll to trigger lazy load
-    container = find_in(page)
-    if not container:
-        for _ in range(10):
-            page.mouse.wheel(0, 1200)
-            page.wait_for_timeout(150)
-            container = find_in(page)
-            if container:
-                break
+    # main page
+    el = page.locator("xpath=//*[contains(normalize-space(.), $t)]", has_text=title).first
+    if el.count() == 0:
+        el = page.get_by_text(pattern).first
+    if el.count() > 0:
+        return el
 
-    if container:
-        return container
-
-    # 2) try in civicrec iframes
+    # civicrec iframes
     for f in page.frames:
         try:
             if "secure.rec1.com" not in (f.url or ""):
                 continue
         except Exception:
             continue
-        container = find_in(f)
-        if container:
-            return container
+        el = f.locator("xpath=//*[contains(normalize-space(.), $t)]", has_text=title).first
+        if el.count() == 0:
+            el = f.get_by_text(pattern).first
+        if el.count() > 0:
+            return el
 
     return None
 
 def list_sessions_for_item(page, title):
     """
-    Locate the card that contains `title`, then read the sessions table inside it.
-    If the table is inside an <iframe>, switch to its content_frame().
-    Returns a sorted list of {"dates":[...], "times":[...]}.
+    Locate the visible heading that contains `title`, then parse the very next
+    table in the DOM. If an iframe appears after the heading, parse the first
+    table inside that iframe. Always returns a sorted list of sessions.
     """
     sessions = []
-    card = _find_card_container(page, title)
-    if not card:
-        return sessions  # not on page (treat as not currently listed)
+    heading = _find_heading_anywhere(page, title)
+    if not heading:
+        return sessions  # treat as not currently listed
 
-    # If the card is collapsible and closed, try clicking its heading area to open.
+    # Make sure the section is open (click once if it looks collapsible)
     try:
-        collapsed = card.get_attribute("aria-hidden") == "true"
-    except Exception:
-        collapsed = False
-    if collapsed:
-        try:
-            card.click(timeout=2000)
-            page.wait_for_timeout(400)
-        except Exception:
-            pass
-
-    # If there is an iframe *inside the card*, read the table within that frame
-    iframe_el = card.locator("iframe").first
-    table_scope = card
-    try:
-        if iframe_el.count() > 0:
-            handle = iframe_el.element_handle()
-            fr = handle.content_frame() if handle else None
-            if fr:
-                table_scope = fr
+        aria_expanded = heading.get_attribute("aria-expanded")
+        if aria_expanded == "false":
+            heading.click(timeout=2000)
+            page.wait_for_timeout(300)
     except Exception:
         pass
 
-    # Prefer a table that has a Dates/Time header; else any visible table in the card
-    table = table_scope.locator("table:has(th:has-text('Dates')), table:has(th:has-text('Time'))").first
-    if table.count() == 0:
-        table = table_scope.locator("table:visible").first
-
-    if table.count() > 0:
-        rows = table.locator("tbody tr")
+    # 1) Try the very next table after the heading
+    next_table = heading.locator("xpath=following::table[1]").first
+    if next_table.count() > 0 and next_table.is_visible():
+        rows = next_table.locator("tbody tr")
         if rows.count() == 0:
-            rows = table.locator("tr").nth(1)  # skip header
+            rows = next_table.locator("tr").nth(1)
         for i in range(rows.count()):
-            row = rows.nth(i)
-            txt = row.inner_text()
+            txt = rows.nth(i).inner_text()
             d, t = extract_dates_times(txt)
             sessions.append({"dates": d or ["n/a"], "times": t or ["n/a"]})
     else:
-        # last resort: parse all text from the card
-        txt = table_scope.locator(":scope").inner_text()
-        d, t = extract_dates_times(txt)
-        sessions.append({"dates": d or ["n/a"], "times": t or ["n/a"]})
+        # 2) If no table, check if the *next iframe* contains the table
+        next_iframe = heading.locator("xpath=following::iframe[1]").first
+        if next_iframe.count() > 0:
+            try:
+                handle = next_iframe.element_handle()
+                fr = handle.content_frame() if handle else None
+            except Exception:
+                fr = None
+            if fr:
+                tbl = fr.locator("table:has(th:has-text('Dates')), table:has(th:has-text('Time'))").first
+                if tbl.count() == 0:
+                    tbl = fr.locator("table").first
+                if tbl.count() > 0:
+                    rows = tbl.locator("tbody tr")
+                    if rows.count() == 0:
+                        rows = tbl.locator("tr").nth(1)
+                    for i in range(rows.count()):
+                        txt = rows.nth(i).inner_text()
+                        d, t = extract_dates_times(txt)
+                        sessions.append({"dates": d or ["n/a"], "times": t or ["n/a"]})
+        # 3) Last resort: parse nearby text block
+        if not sessions:
+            block = heading.locator("xpath=following::*[self::div or self::section][1]")
+            try:
+                txt = block.inner_text()
+            except Exception:
+                txt = page.locator("body").inner_text()
+            d, t = extract_dates_times(txt)
+            sessions.append({"dates": d or ["n/a"], "times": t or ["n/a"]})
 
-    # stable order for diffs
     sessions.sort(key=lambda s: (";".join(s["dates"]), ";".join(s["times"])))
     return sessions
 
