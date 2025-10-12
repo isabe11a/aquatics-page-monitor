@@ -3,38 +3,13 @@
     {
       "title": "Swim Lesson Level 1: Baby Pups & Parent Seals",
       "url": "inline:swim-lesson-level-1-baby-pups-parent-seals",
-      "sessions": [
-        {
-          "dates": [
-            "09/13-10/11",
-            "10/06-10/16"
-          ],
-          "times": [
-            "10:00AM",
-            "10:25am",
-            "5:00PM",
-            "5:25pm"
-          ]
-        }
-      ]
+      "sessions": []
     },
     {
       "title": "Swim Lesson Level 2: Sea Horses",
       "url": "inline:swim-lesson-level-2-sea-horses",
-      "sessions": [
-        {
-          "dates": [
-            "09/13-10/11",
-            "10/06-10/16"
-          ],
-          "times": [
-            "10:30am-10:55am",
-            "12:30pm-12:55pm",
-            "4:30pm-4:55pm"
-          ]
-        }
-      ]
+      "sessions": []
     }
   ],
-  "last_updated": "2025-10-12T07:33:15.300514"
+  "last_updated": "2025-10-12T07:52:23.641196"
 }
