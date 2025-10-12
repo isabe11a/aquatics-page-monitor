@@ -153,90 +153,91 @@ def list_sessions_for_item(page, title):
     
     log(f"[DEBUG] Found heading for: {title}, clicking to open modal")
     
+    # Count tables before clicking
+    tables_before = page.locator("table").count()
+    log(f"[DEBUG] Tables on page before click: {tables_before}")
+    
     try:
         # Click to open modal
         heading.click(timeout=3000)
+        log("[DEBUG] Clicked successfully")
         
-        # Wait longer for modal to appear and animate
-        page.wait_for_timeout(3000)
+        # Explicitly wait for a table with session data to appear
+        # This is more reliable than just waiting for time
+        try:
+            # Wait for either a table with DATES header or just any new table
+            page.wait_for_selector("table th:has-text('DATES'), table th:has-text('Dates'), table", timeout=8000, state="visible")
+            log("[DEBUG] Table appeared on page")
+        except Exception as e:
+            log(f"[DEBUG] Timeout waiting for table to appear: {e}")
         
-        log("[DEBUG] Clicked, waiting for modal to appear")
+        # Give extra time for content to fully load
+        page.wait_for_timeout(2000)
         
-        # The modal might take a moment to become visible
-        # Look for any element that appeared and contains a table with our title
+        # Count tables after clicking
+        tables_after = page.locator("table").count()
+        log(f"[DEBUG] Tables on page after click: {tables_after}")
         
-        # Strategy 1: Find any visible element containing the title AND a table
-        # The modal should have both the program title and the session table
+        # Strategy 1: Check ALL tables on the page (not just visible ones)
+        # The modal table might not register as "visible" for some CSS reason
         modal_found = False
-        modal_element = None
+        tables = page.locator("table")
         
-        # Try multiple selector strategies
-        modal_selectors = [
-            f"text={title}",  # Any element with the title
-            '[class*="modal"]',
-            '[class*="dialog"]',
-            '[class*="overlay"]',
-            '[class*="popup"]',
-            'div[style*="z-index"]',  # Modals often have high z-index
-        ]
+        for i in range(tables.count()):
+            tbl = tables.nth(i)
+            try:
+                # Get the text content regardless of visibility
+                text = tbl.inner_text()
+                log(f"[DEBUG] Table {i} text length: {len(text)}")
+                
+                # Check if this table has session headers
+                if ("DATES" in text.upper() or "DATE" in text.upper()) and ("TIMES" in text.upper() or "TIME" in text.upper()):
+                    log(f"[DEBUG] ✓ Table {i} has DATES and TIMES columns!")
+                    log(f"[DEBUG] Table {i} preview: {text[:300]}")
+                    
+                    # Try to parse this table
+                    parsed = parse_table_by_headers(tbl)
+                    if parsed:
+                        log(f"[DEBUG] ✓ Successfully parsed {len(parsed)} sessions from table {i}")
+                        sessions.extend(parsed)
+                        modal_found = True
+                        break
+                    else:
+                        log(f"[DEBUG] Table {i} has headers but parsing returned no sessions")
+            except Exception as e:
+                log(f"[DEBUG] Error checking table {i}: {e}")
         
-        for selector in modal_selectors:
-            elements = page.locator(selector)
-            for i in range(elements.count()):
-                elem = elements.nth(i)
+        # Strategy 2: If no table found, look for any element with title and dates/times in text
+        if not modal_found:
+            log("[DEBUG] No table found, trying text-based search for modal")
+            
+            # Look for any div/section that contains both the title and date patterns
+            all_containers = page.locator('div, section, [role="dialog"]')
+            log(f"[DEBUG] Checking {min(50, all_containers.count())} containers for session data")
+            
+            for i in range(min(50, all_containers.count())):
                 try:
-                    if elem.is_visible():
-                        text = elem.inner_text()
-                        # Check if this element contains both the title and table data
-                        if title.lower() in text.lower() and ("SESSION" in text or "DATES" in text or "TIMES" in text):
-                            log(f"[DEBUG] Found modal element with selector: {selector}")
-                            modal_element = elem
+                    container = all_containers.nth(i)
+                    text = container.inner_text()
+                    
+                    # Skip if too short
+                    if len(text) < 100:
+                        continue
+                    
+                    # Check if contains title and dates/times
+                    if title.lower() in text.lower():
+                        dates, times = extract_dates_times(text)
+                        if dates or times:
+                            log(f"[DEBUG] ✓ Container {i} has title and dates/times!")
+                            log(f"[DEBUG] Preview: {text[:400]}")
+                            sessions.append({"dates": dates or ["n/a"], "times": times or ["n/a"]})
                             modal_found = True
                             break
                 except:
                     continue
-            if modal_found:
-                break
         
-        # Strategy 2: If no modal found above, look for tables that appeared recently
         if not modal_found:
-            log("[DEBUG] Modal not found with title, looking for any new visible table")
-            tables = page.locator("table")
-            for i in range(tables.count()):
-                tbl = tables.nth(i)
-                try:
-                    if tbl.is_visible():
-                        text = tbl.inner_text()
-                        # Check if table has session-like headers
-                        if "DATES" in text and "TIMES" in text:
-                            log(f"[DEBUG] Found table {i} with DATES and TIMES columns")
-                            # Use the table's parent as the modal
-                            modal_element = tbl.locator("xpath=ancestor::*[self::div or self::section][1]")
-                            if modal_element.count() > 0:
-                                modal_element = modal_element.first
-                                modal_found = True
-                                break
-                except:
-                    continue
-        
-        if modal_found and modal_element:
-            log(f"[DEBUG] Modal found, extracting sessions")
-            
-            # Look for the table in the modal
-            table = modal_element.locator("table").first
-            if table.count() > 0:
-                log(f"[DEBUG] Found table in modal")
-                sessions = parse_table_by_headers(table)
-                log(f"[DEBUG] Parsed {len(sessions)} sessions from table")
-            else:
-                log(f"[DEBUG] No table found in modal, trying text extraction")
-                # Fallback: extract dates/times from modal text
-                text = modal_element.inner_text()
-                d_dates, d_times = extract_dates_times(text)
-                if d_dates or d_times:
-                    sessions.append({"dates": d_dates or ["n/a"], "times": d_times or ["n/a"]})
-        else:
-            log(f"[DEBUG] Modal not found for {title}")
+            log(f"[DEBUG] Modal/table not found for {title}")
         
         # Close the modal by pressing Escape or clicking X
         try:
