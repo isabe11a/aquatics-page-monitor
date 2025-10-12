@@ -335,6 +335,9 @@ def _find_card_for_heading(scope, heading):
         container = heading.locator("xpath=ancestor::*[self::div or self::section or self::li][1]")
     return container
 
+# Add this debugging version of list_sessions_for_item
+# Replace the existing function with this one
+
 def list_sessions_for_item(page, title):
     """
     Resolve a REAL detail page URL for `title` anywhere on the page/frames,
@@ -344,69 +347,130 @@ def list_sessions_for_item(page, title):
 
     # First, see if we can directly resolve a detail URL without expanding
     detail_url = _find_detail_url_by_title(page, title)
+    log(f"[DEBUG] Initial detail_url search for '{title}': {detail_url}")
 
     # If not found, expand the card and try again (some links appear only when expanded)
     if not detail_url:
         heading = _find_heading_anywhere(page, title)
         if heading:
+            log(f"[DEBUG] Found heading, attempting to click to expand")
             try:
                 heading.click(timeout=2500)
-                page.wait_for_timeout(400)
-            except Exception:
-                pass
+                page.wait_for_timeout(800)  # Give it more time
+                log(f"[DEBUG] Clicked heading, waiting for content")
+            except Exception as e:
+                log(f"[DEBUG] Click failed: {e}")
+            
+            # Try searching again after expansion
             detail_url = _find_detail_url_by_title(page, title)
+            log(f"[DEBUG] After expansion, detail_url: {detail_url}")
+            
+            # ALSO try to find ANY href near the heading
+            if not detail_url:
+                try:
+                    parent = heading.locator("xpath=ancestor::*[self::div or self::section or self::li][1]")
+                    all_links = parent.locator("a[href]").all()
+                    log(f"[DEBUG] Found {len(all_links)} links in parent container")
+                    for i, link in enumerate(all_links[:5]):  # Check first 5
+                        href = link.get_attribute("href")
+                        log(f"[DEBUG] Link {i}: {href}")
+                except Exception as e:
+                    log(f"[DEBUG] Error checking parent links: {e}")
 
     if not detail_url:
-        # No real URL found; as a last resort, try the nearest following iframe approach you had before
+        log(f"[DEBUG] No detail URL found, trying iframe approach")
+        # No real URL found; as a last resort, try the nearest following iframe approach
         heading = _find_heading_anywhere(page, title)
         if heading:
             next_iframe = heading.locator("xpath=following::iframe[1]").first
+            log(f"[DEBUG] Looking for iframe, count: {next_iframe.count()}")
             if next_iframe.count() > 0:
                 try:
                     handle = next_iframe.element_handle()
                     fr = handle.content_frame() if handle else None
-                except Exception:
+                    log(f"[DEBUG] Got iframe frame: {fr is not None}")
+                except Exception as e:
+                    log(f"[DEBUG] Iframe access error: {e}")
                     fr = None
+                    
                 if fr:
+                    # Check what's in the iframe
+                    try:
+                        iframe_html = fr.content()
+                        log(f"[DEBUG] Iframe HTML length: {len(iframe_html)}")
+                        log(f"[DEBUG] Iframe HTML preview: {iframe_html[:500]}")
+                    except:
+                        pass
+                    
                     tbl = fr.locator("table:has(th:has-text('Dates')), table:has(th:has-text('Time'))").first
                     if tbl.count() == 0:
                         tbl = fr.locator("table").first
+                    log(f"[DEBUG] Table count in iframe: {tbl.count()}")
+                    
                     parsed = []
                     if tbl.count() > 0:
                         parsed = parse_table_by_headers(tbl)
+                        log(f"[DEBUG] Parsed {len(parsed)} sessions from table")
                     if not parsed:
                         grid = fr.locator('[role="grid"], [role="table"]').first
+                        log(f"[DEBUG] ARIA grid count: {grid.count()}")
                         if grid.count() > 0:
                             parsed = parse_aria_grid(grid)
+                            log(f"[DEBUG] Parsed {len(parsed)} sessions from ARIA grid")
                     if parsed:
                         parsed.sort(key=lambda s: (";".join(s["dates"]), ";".join(s["times"])))
                         return parsed
-        # Still nothing: give up quietly; _has_real_sessions will mark as absent
+        
+        log(f"[DEBUG] All methods failed, returning empty sessions")
         return sessions
 
     # Open the detail page and parse there
-    log(f"opening detail: {detail_url}")
+    log(f"[DEBUG] Opening detail page: {detail_url}")
     page.goto(detail_url, wait_until="domcontentloaded")
-    page.wait_for_timeout(600)
+    page.wait_for_timeout(1000)  # Give it more time
+    
+    # Take a screenshot for debugging
+    try:
+        page.screenshot(path=f"debug_{title.replace(' ', '_')[:30]}.png")
+        log(f"[DEBUG] Screenshot saved")
+    except:
+        pass
 
     parsed = []
     try:
+        # Check page content
+        log(f"[DEBUG] Page URL after navigation: {page.url}")
+        log(f"[DEBUG] Page title: {page.title()}")
+        
         tbl = page.locator("table:has(th:has-text('Dates')), table:has(th:has-text('Time'))").first
         if tbl.count() == 0:
             tbl = page.locator("table").first
+        log(f"[DEBUG] Table count on detail page: {tbl.count()}")
+        
         if tbl.count() > 0:
             parsed = parse_table_by_headers(tbl)
+            log(f"[DEBUG] Parsed {len(parsed)} sessions from detail page table")
+        
         if not parsed:
             grid = page.locator('[role="grid"], [role="table"]').first
+            log(f"[DEBUG] ARIA grid count on detail page: {grid.count()}")
             if grid.count() > 0:
                 parsed = parse_aria_grid(grid)
+                log(f"[DEBUG] Parsed {len(parsed)} sessions from detail page ARIA grid")
+        
         if not parsed:
+            log(f"[DEBUG] Trying fallback text parser")
             parsed = parse_detail_page_fallback(page)
-    except Exception:
+            log(f"[DEBUG] Fallback found {len(parsed)} sessions")
+    except Exception as e:
+        log(f"[DEBUG] Error parsing detail page: {e}")
+        import traceback
+        log(f"[DEBUG] Traceback: {traceback.format_exc()}")
         parsed = []
 
     if parsed:
         sessions.extend(parsed)
+        log(f"[DEBUG] Total sessions collected: {len(sessions)}")
 
     # Go back to the list page for the next title
     try:
@@ -420,7 +484,7 @@ def list_sessions_for_item(page, title):
 
 def get_items_with_sessions():
     with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True)
+        browser = p.chromium.launch(headless=False, slow_mo=1000)  # See what's happening
         ctx = browser.new_context()
         page = ctx.new_page()
         open_aquatics(page)
