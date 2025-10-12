@@ -35,22 +35,24 @@ def extract_dates_times(text: str):
 def open_aquatics(page):
     log(f"goto {CATALOG_URL}")
     page.goto(CATALOG_URL, wait_until="domcontentloaded")
-    page.wait_for_timeout(1500)
+    page.wait_for_timeout(2000)  # Increased wait time
+    
     # Try clicking the category tab if present
     for label in ["Aquatics Programs", "Aquatics"]:
         loc = page.locator(f"text={label}")
         if loc.count():
             log(f"clicking category: {label}")
             try:
-                loc.first.click(timeout=2500)
-                page.wait_for_timeout(800)
+                loc.first.click(timeout=3000)
+                page.wait_for_timeout(1200)  # More time after clicking
                 break
             except Exception as e:
                 log(f"warn: category click failed: {e}")
+    
     # Soft scroll to load content
-    for _ in range(10):
+    for i in range(15):
         page.mouse.wheel(0, 1200)
-        page.wait_for_timeout(120)
+        page.wait_for_timeout(150)
     log("finished initial scroll")
 
 def _frames(page):
@@ -64,97 +66,28 @@ def _frames(page):
     return fr
 
 def _find_heading_anywhere(page, title):
-    """
-    Find the visible heading element containing the title text,
-    on the main page or civicrec iframes.
-    """
+    """Find the visible heading element containing the title text."""
     patt = re.compile(re.escape(title), re.I)
     for scope in _frames(page):
         # Try role=link first (fast path)
         link = scope.get_by_role("link", name=patt)
         if link.count() > 0:
-            log(f"heading found as link in scope {getattr(scope,'url',None)}")
+            log(f"[DEBUG] heading found as link in scope")
             return link.first
         # Generic text search
         el = scope.get_by_text(patt).first
         if el.count() > 0:
-            log(f"heading found by text in scope {getattr(scope,'url',None)}")
+            log(f"[DEBUG] heading found by text in scope")
             return el
-    log(f"heading NOT found: {title}")
-    return None
-
-def _find_detail_url_by_title(page, title):
-    """
-    Search the main page and all civicrec iframes for a REAL detail URL
-    (e.g., /catalog/item/...) whose link or surrounding container mentions `title`.
-    Returns an absolute URL or None.
-    """
-    def normalize(u):
-        if not u:
-            return None
-        u = u.strip()
-        if not u or u.startswith("javascript"):
-            return None
-        if u.startswith("/"):
-            return f"https://secure.rec1.com{u}"
-        if u.startswith("http"):
-            return u
-        return None
-
-    # search in a given scope (page or frame)
-    def search_scope(scope):
-        anchors = scope.locator('a[href*="/catalog/item/"]').all()
-        # broader: sometimes it's "/programs/" or similar
-        anchors += scope.locator('a[href*="/program"]').all()
-        for a in anchors:
-            try:
-                href = normalize(a.get_attribute("href"))
-            except Exception:
-                href = None
-            if not href:
-                continue
-            # check the link text first
-            txt = (a.inner_text() or "").strip()
-            if txt and title.lower() in txt.lower():
-                return href
-            # otherwise, check a nearby container’s text
-            try:
-                cont = a.locator("xpath=ancestor::*[self::div or self::section or self::li][1]")
-                ctxt = (cont.inner_text() or "").strip()
-            except Exception:
-                ctxt = ""
-            if ctxt and title.lower() in ctxt.lower():
-                return href
-        return None
-
-    # 1) main page
-    url = search_scope(page)
-    if url:
-        return url
-
-    # 2) civicrec iframes
-    for f in page.frames:
-        try:
-            if "secure.rec1.com" not in (f.url or ""):
-                continue
-        except Exception:
-            continue
-        url = search_scope(f)
-        if url:
-            return url
-
+    log(f"[DEBUG] heading NOT found: {title}")
     return None
 
 def parse_table_by_headers(tbl):
-    """
-    Parse a plain HTML table that has session data. Finds the Dates/Times columns
-    by header text; falls back to common CivicRec positions (Dates=5th, Times=6th).
-    Returns list[{"dates":[...], "times":[...]}].
-    """
+    """Parse a plain HTML table that has session data."""
     out = []
     try:
         try:
-            tbl.wait_for(state="visible", timeout=5000)
+            tbl.wait_for(state="visible", timeout=3000)
         except Exception:
             pass
 
@@ -179,11 +112,13 @@ def parse_table_by_headers(tbl):
                 if times_col is None and ("time" in h or "times" in h):
                     times_col = i
 
-        # Hard fallback to CivicRec’s typical column order (0-based)
+        # Hard fallback to CivicRec's typical column order (0-based)
         if dates_col is None:
             dates_col = 4
         if times_col is None:
             times_col = 5
+
+        log(f"[DEBUG] Using dates_col={dates_col}, times_col={times_col}")
 
         # Data rows
         rows = tbl.locator("tbody tr")
@@ -203,23 +138,21 @@ def parse_table_by_headers(tbl):
                 return ""
 
         n = rows.count()
+        log(f"[DEBUG] Processing {n} table rows")
         for i in range(n):
             r = rows.nth(i)
             dates_txt = cell_text(r, dates_col)
             times_txt = cell_text(r, times_col)
+            log(f"[DEBUG] Row {i}: dates='{dates_txt}', times='{times_txt}'")
             d_dates, d_times = extract_dates_times(f"{dates_txt} {times_txt}")
             if d_dates or d_times:
                 out.append({"dates": d_dates or ["n/a"], "times": d_times or ["n/a"]})
-    except Exception:
-        # swallow and return whatever we got
-        pass
+    except Exception as e:
+        log(f"[DEBUG] Error parsing table: {e}")
     return out
 
 def parse_aria_grid(scope):
-    """
-    Parse a CivicRec-style ARIA grid (divs with role=columnheader/row/cell).
-    Returns list[{"dates":[...], "times":[...]}].
-    """
+    """Parse a CivicRec-style ARIA grid."""
     sessions = []
 
     headers = scope.locator('[role="columnheader"]')
@@ -232,15 +165,18 @@ def parse_aria_grid(scope):
         if times_idx is None and ("time" in txt or "times" in txt):
             times_idx = i
     if dates_idx is None:
-        dates_idx = 4  # SESSION|LOCATION|AGE|DAYS|DATES|TIMES|...
+        dates_idx = 4
     if times_idx is None:
         times_idx = 5
 
+    log(f"[DEBUG] ARIA grid using dates_idx={dates_idx}, times_idx={times_idx}")
+
     rows = scope.locator('[role="row"]')
     rcount = rows.count()
+    log(f"[DEBUG] Processing {rcount} ARIA grid rows")
+    
     for r in range(rcount):
         row = rows.nth(r)
-        # skip header rows
         if row.locator('[role="columnheader"]').count() > 0:
             continue
         cells = row.locator('[role="cell"]')
@@ -258,6 +194,7 @@ def parse_aria_grid(scope):
 
         dates_txt = safe_cell(dates_idx)
         times_txt = safe_cell(times_idx)
+        log(f"[DEBUG] ARIA row {r}: dates='{dates_txt}', times='{times_txt}'")
         d_dates, d_times = extract_dates_times(f"{dates_txt} {times_txt}")
         if d_dates or d_times:
             sessions.append({"dates": d_dates or ["n/a"], "times": d_times or ["n/a"]})
@@ -265,241 +202,197 @@ def parse_aria_grid(scope):
     return sessions
 
 def parse_detail_page_fallback(scope):
-    """
-    Last-resort parser for detail pages: scan visible text for MM/DD–MM/DD and times.
-    """
+    """Last-resort parser for detail pages: scan visible text."""
     try:
         txt = scope.locator("body").inner_text()
+        log(f"[DEBUG] Fallback parsing {len(txt)} chars of body text")
     except Exception:
         return []
     d_dates, d_times = extract_dates_times(txt)
     if d_dates or d_times:
+        log(f"[DEBUG] Fallback found dates={d_dates}, times={d_times}")
         return [{"dates": d_dates or ["n/a"], "times": d_times or ["n/a"]}]
     return []
 
-def _wait_for_sessions_region(page, heading, timeout=4000):
-    """
-    After clicking the heading, wait for a sessions region to appear:
-    - a real <table>,
-    - an ARIA grid/table,
-    - or an <iframe> that likely contains one.
-    Returns a dict of locators we can try in order.
-    """
-    # give the DOM a moment to react
-    page.wait_for_timeout(200)
-
-    region = {
-        "tables_same": heading.locator('xpath=following::*[self::table][1]'),
-        "grid_same":   heading.locator('xpath=following::*[@role="grid" or @role="table"][1]'),
-        "iframe_same": heading.locator('xpath=following::iframe[1]'),
-    }
-
-    # Wait, but don’t die if nothing appears quickly
-    try:
-        page.wait_for_timeout(200)
-        if region["tables_same"].count() == 0 and region["grid_same"].count() == 0 and region["iframe_same"].count() == 0:
-            page.wait_for_timeout(timeout)
-    except Exception:
-        pass
-    return region
-
-def _all_candidate_scopes(page, heading):
-    """
-    Build a list of candidate scopes to search for sessions, in priority order:
-    - first few following tables in same doc,
-    - first few ARIA grids in same doc,
-    - first few iframes following the heading (we’ll parse inside).
-    """
-    scopes = []
-    # up to three following tables/grids/iframes (bounded breadth)
-    tables = heading.locator('xpath=following::table[position()<=3]')
-    grids  = heading.locator('xpath=following::*[@role="grid" or @role="table"][position()<=3]')
-    iframes = heading.locator('xpath=following::iframe[position()<=3]')
-
-    scopes.append(("tables_same", tables))
-    scopes.append(("grids_same", grids))
-    scopes.append(("iframes", iframes))
-    return scopes
-
-def _find_card_for_heading(scope, heading):
-    """
-    Starting from the heading element, climb to a reasonable container that
-    represents the expanded card/row.
-    """
-    # nearest div/section/li with a class hint
-    container = heading.locator(
-        "xpath=ancestor::*[self::div or self::section or self::li]"
-        "[contains(@class,'item') or contains(@class,'card') or contains(@class,'program') or contains(@class,'row')][1]"
-    )
-    if container.count() == 0:
-        container = heading.locator("xpath=ancestor::*[self::div or self::section or self::li][1]")
-    return container
-
-# Add this debugging version of list_sessions_for_item
-# Replace the existing function with this one
-
 def list_sessions_for_item(page, title):
     """
-    Resolve a REAL detail page URL for `title` anywhere on the page/frames,
-    open it, parse sessions there, then go back.
+    Click to expand the item on the main page and parse sessions directly,
+    without navigating to a separate detail page.
     """
     sessions = []
-
-    # First, see if we can directly resolve a detail URL without expanding
-    detail_url = _find_detail_url_by_title(page, title)
-    log(f"[DEBUG] Initial detail_url search for '{title}': {detail_url}")
-
-    # If not found, expand the card and try again (some links appear only when expanded)
-    if not detail_url:
-        heading = _find_heading_anywhere(page, title)
-        if heading:
-            log(f"[DEBUG] Found heading, attempting to click to expand")
-            try:
-                heading.click(timeout=2500)
-                page.wait_for_timeout(800)  # Give it more time
-                log(f"[DEBUG] Clicked heading, waiting for content")
-            except Exception as e:
-                log(f"[DEBUG] Click failed: {e}")
-            
-            # Try searching again after expansion
-            detail_url = _find_detail_url_by_title(page, title)
-            log(f"[DEBUG] After expansion, detail_url: {detail_url}")
-            
-            # ALSO try to find ANY href near the heading
-            if not detail_url:
-                try:
-                    parent = heading.locator("xpath=ancestor::*[self::div or self::section or self::li][1]")
-                    all_links = parent.locator("a[href]").all()
-                    log(f"[DEBUG] Found {len(all_links)} links in parent container")
-                    for i, link in enumerate(all_links[:5]):  # Check first 5
-                        href = link.get_attribute("href")
-                        log(f"[DEBUG] Link {i}: {href}")
-                except Exception as e:
-                    log(f"[DEBUG] Error checking parent links: {e}")
-
-    if not detail_url:
-        log(f"[DEBUG] No detail URL found, trying iframe approach")
-        # No real URL found; as a last resort, try the nearest following iframe approach
-        heading = _find_heading_anywhere(page, title)
-        if heading:
-            next_iframe = heading.locator("xpath=following::iframe[1]").first
-            log(f"[DEBUG] Looking for iframe, count: {next_iframe.count()}")
-            if next_iframe.count() > 0:
-                try:
-                    handle = next_iframe.element_handle()
-                    fr = handle.content_frame() if handle else None
-                    log(f"[DEBUG] Got iframe frame: {fr is not None}")
-                except Exception as e:
-                    log(f"[DEBUG] Iframe access error: {e}")
-                    fr = None
-                    
-                if fr:
-                    # Check what's in the iframe
-                    try:
-                        iframe_html = fr.content()
-                        log(f"[DEBUG] Iframe HTML length: {len(iframe_html)}")
-                        log(f"[DEBUG] Iframe HTML preview: {iframe_html[:500]}")
-                    except:
-                        pass
-                    
-                    tbl = fr.locator("table:has(th:has-text('Dates')), table:has(th:has-text('Time'))").first
-                    if tbl.count() == 0:
-                        tbl = fr.locator("table").first
-                    log(f"[DEBUG] Table count in iframe: {tbl.count()}")
-                    
-                    parsed = []
-                    if tbl.count() > 0:
-                        parsed = parse_table_by_headers(tbl)
-                        log(f"[DEBUG] Parsed {len(parsed)} sessions from table")
-                    if not parsed:
-                        grid = fr.locator('[role="grid"], [role="table"]').first
-                        log(f"[DEBUG] ARIA grid count: {grid.count()}")
-                        if grid.count() > 0:
-                            parsed = parse_aria_grid(grid)
-                            log(f"[DEBUG] Parsed {len(parsed)} sessions from ARIA grid")
-                    if parsed:
-                        parsed.sort(key=lambda s: (";".join(s["dates"]), ";".join(s["times"])))
-                        return parsed
-        
-        log(f"[DEBUG] All methods failed, returning empty sessions")
-        return sessions
-
-    # Open the detail page and parse there
-    log(f"[DEBUG] Opening detail page: {detail_url}")
-    page.goto(detail_url, wait_until="domcontentloaded")
-    page.wait_for_timeout(1000)  # Give it more time
     
-    # Take a screenshot for debugging
+    # Find and click the heading to expand
+    heading = _find_heading_anywhere(page, title)
+    if not heading:
+        log(f"[DEBUG] Heading not found for: {title}")
+        return sessions
+    
+    log(f"[DEBUG] Found heading for: {title}, attempting to click")
+    
     try:
-        page.screenshot(path=f"debug_{title.replace(' ', '_')[:30]}.png")
-        log(f"[DEBUG] Screenshot saved")
-    except:
-        pass
-
-    parsed = []
-    try:
-        # Check page content
-        log(f"[DEBUG] Page URL after navigation: {page.url}")
-        log(f"[DEBUG] Page title: {page.title()}")
+        # Click to expand
+        heading.click(timeout=3000)
+        page.wait_for_timeout(2000)  # Wait for expansion animation and content load
+        log("[DEBUG] Clicked to expand, waiting for content")
         
-        tbl = page.locator("table:has(th:has-text('Dates')), table:has(th:has-text('Time'))").first
-        if tbl.count() == 0:
-            tbl = page.locator("table").first
-        log(f"[DEBUG] Table count on detail page: {tbl.count()}")
+        # Wait for session content to appear (table, grid, or iframe)
+        try:
+            page.wait_for_selector("table, [role='grid'], iframe", timeout=5000, state="visible")
+            log("[DEBUG] Session content appeared")
+        except Exception:
+            log("[DEBUG] Timeout waiting for session content, proceeding anyway")
         
-        if tbl.count() > 0:
-            parsed = parse_table_by_headers(tbl)
-            log(f"[DEBUG] Parsed {len(parsed)} sessions from detail page table")
+        # Find the container that was expanded
+        container = heading.locator(
+            "xpath=ancestor::*[self::div or self::section or self::article or self::li]"
+            "[contains(@class,'item') or contains(@class,'card') or contains(@class,'program') "
+            "or contains(@class,'expandable') or contains(@class,'row')][1]"
+        )
         
-        if not parsed:
-            grid = page.locator('[role="grid"], [role="table"]').first
-            log(f"[DEBUG] ARIA grid count on detail page: {grid.count()}")
-            if grid.count() > 0:
-                parsed = parse_aria_grid(grid)
-                log(f"[DEBUG] Parsed {len(parsed)} sessions from detail page ARIA grid")
+        if container.count() == 0:
+            container = heading.locator("xpath=ancestor::*[self::div or self::section or self::article][1]")
         
-        if not parsed:
-            log(f"[DEBUG] Trying fallback text parser")
-            parsed = parse_detail_page_fallback(page)
-            log(f"[DEBUG] Fallback found {len(parsed)} sessions")
+        log(f"[DEBUG] Container found: {container.count()}")
+        
+        if container.count() > 0:
+            cont = container.first
+            
+            # Method 1: Look for tables within this container
+            tables = cont.locator("table")
+            log(f"[DEBUG] Tables in container: {tables.count()}")
+            
+            for i in range(tables.count()):
+                tbl = tables.nth(i)
+                try:
+                    if tbl.is_visible():
+                        log(f"[DEBUG] Parsing table {i}")
+                        parsed = parse_table_by_headers(tbl)
+                        if parsed:
+                            log(f"[DEBUG] Found {len(parsed)} sessions in table {i}")
+                            sessions.extend(parsed)
+                except Exception as e:
+                    log(f"[DEBUG] Error with table {i}: {e}")
+            
+            # Method 2: Look for ARIA grids
+            if not sessions:
+                grids = cont.locator('[role="grid"], [role="table"]')
+                log(f"[DEBUG] ARIA grids in container: {grids.count()}")
+                
+                for i in range(grids.count()):
+                    grid = grids.nth(i)
+                    try:
+                        if grid.is_visible():
+                            log(f"[DEBUG] Parsing ARIA grid {i}")
+                            parsed = parse_aria_grid(grid)
+                            if parsed:
+                                log(f"[DEBUG] Found {len(parsed)} sessions in ARIA grid {i}")
+                                sessions.extend(parsed)
+                    except Exception as e:
+                        log(f"[DEBUG] Error with ARIA grid {i}: {e}")
+            
+            # Method 3: Look for iframes within the container
+            if not sessions:
+                iframes = cont.locator("iframe")
+                log(f"[DEBUG] Iframes in container: {iframes.count()}")
+                
+                for i in range(iframes.count()):
+                    try:
+                        iframe = iframes.nth(i)
+                        iframe.wait_for(state="visible", timeout=3000)
+                        handle = iframe.element_handle()
+                        fr = handle.content_frame() if handle else None
+                        
+                        if fr:
+                            log(f"[DEBUG] Processing iframe {i}")
+                            page.wait_for_timeout(1000)  # Let iframe content load
+                            
+                            # Try table in iframe
+                            tbl = fr.locator("table").first
+                            if tbl.count() > 0:
+                                log(f"[DEBUG] Found table in iframe {i}")
+                                parsed = parse_table_by_headers(tbl)
+                                if parsed:
+                                    log(f"[DEBUG] Found {len(parsed)} sessions in iframe table")
+                                    sessions.extend(parsed)
+                            
+                            # Try ARIA grid in iframe
+                            if not sessions:
+                                grid = fr.locator('[role="grid"], [role="table"]').first
+                                if grid.count() > 0:
+                                    log(f"[DEBUG] Found ARIA grid in iframe {i}")
+                                    parsed = parse_aria_grid(grid)
+                                    if parsed:
+                                        log(f"[DEBUG] Found {len(parsed)} sessions in iframe ARIA grid")
+                                        sessions.extend(parsed)
+                    except Exception as e:
+                        log(f"[DEBUG] Error processing iframe {i}: {e}")
+            
+            # Method 4: Fallback to text parsing in the container
+            if not sessions:
+                try:
+                    text = cont.inner_text()
+                    log(f"[DEBUG] Container text length: {len(text)}")
+                    if len(text) > 100:
+                        log(f"[DEBUG] Container text preview: {text[:300]}")
+                    d_dates, d_times = extract_dates_times(text)
+                    if d_dates or d_times:
+                        sessions.append({"dates": d_dates or ["n/a"], "times": d_times or ["n/a"]})
+                        log(f"[DEBUG] Found dates/times via text parsing: {d_dates}, {d_times}")
+                except Exception as e:
+                    log(f"[DEBUG] Text parsing error: {e}")
+        
+        # Additional fallback: search the entire page for visible tables after the click
+        if not sessions:
+            log("[DEBUG] Trying page-wide search for sessions")
+            
+            all_tables = page.locator("table")
+            log(f"[DEBUG] Total tables on page: {all_tables.count()}")
+            
+            for i in range(all_tables.count()):
+                tbl = all_tables.nth(i)
+                try:
+                    if tbl.is_visible():
+                        parsed = parse_table_by_headers(tbl)
+                        if parsed and any(s.get("dates", []) != ["n/a"] for s in parsed):
+                            log(f"[DEBUG] Found relevant sessions in page table {i}")
+                            sessions.extend(parsed)
+                            break  # Take first valid one
+                except Exception as e:
+                    log(f"[DEBUG] Error checking table {i}: {e}")
+        
     except Exception as e:
-        log(f"[DEBUG] Error parsing detail page: {e}")
+        log(f"[DEBUG] Error expanding/parsing {title}: {e}")
         import traceback
         log(f"[DEBUG] Traceback: {traceback.format_exc()}")
-        parsed = []
-
-    if parsed:
-        sessions.extend(parsed)
-        log(f"[DEBUG] Total sessions collected: {len(sessions)}")
-
-    # Go back to the list page for the next title
-    try:
-        page.go_back(wait_until="domcontentloaded")
-        page.wait_for_timeout(500)
-    except Exception:
-        pass
-
+    
     sessions.sort(key=lambda s: (";".join(s["dates"]), ";".join(s["times"])))
+    log(f"[DEBUG] Total sessions found for {title}: {len(sessions)}")
     return sessions
 
 def get_items_with_sessions():
     with sync_playwright() as p:
-        browser = p.chromium.launch(headless=False, slow_mo=1000)  # See what's happening
+        browser = p.chromium.launch(headless=True)  # FIXED: Set back to headless
         ctx = browser.new_context()
         page = ctx.new_page()
         open_aquatics(page)
 
         items = []
         for title in TARGET_TITLES:
-            # fabricate a stable inline tag; titles are fixed
             url = "inline:" + re.sub(r"[^a-z0-9]+", "-", title.lower()).strip("-")
             try:
                 sessions = list_sessions_for_item(page, title)
                 log(f"{title}: sessions found = {len(sessions)}")
             except Exception as e:
                 log(f"ERROR collecting sessions for {title}: {e}")
+                import traceback
+                log(traceback.format_exc())
                 sessions = []
             items.append({"title": title, "url": url, "sessions": sessions})
+            
+            # Wait between items and scroll back up for next item
+            page.wait_for_timeout(1000)
+            page.mouse.wheel(0, -5000)  # Scroll back up
+            page.wait_for_timeout(500)
 
         browser.close()
 
@@ -609,6 +502,8 @@ def main():
     except Exception as e:
         # Never leave report.txt empty
         print("### Aquatics Monitor - ERROR\n\n" + str(e), flush=True)
+        import traceback
+        print("\n" + traceback.format_exc(), flush=True)
         # Do not raise further; let workflow continue to email the error report.
         sys.exit(0)
 
