@@ -225,27 +225,42 @@ def list_sessions_for_item(page, title):
                 except:
                     pass
         
-        # STRATEGY 4: Text-based fallback - extract dates/times from page body
-        # The modal may render content that's visible but not in a proper table/iframe
+        # STRATEGY 4: Search all containers for ones with title + dates/times
+        # The modal content may be in a container that's not properly marked as a modal
         if not modal_found:
-            try:
-                body_text = page.locator("body").inner_text()
-                # Find the position of our title in the text
-                title_lower = title.lower()
-                title_pos = body_text.lower().find(title_lower)
-                
-                if title_pos >= 0:
-                    # Get a reasonable chunk of text after the title (next 1000 chars)
-                    context = body_text[title_pos:title_pos + 1000]
-                    dates, times = extract_dates_times(context)
+            all_containers = page.locator('div, section, [role="dialog"]')
+            
+            for i in range(min(100, all_containers.count())):
+                try:
+                    container = all_containers.nth(i)
+                    text = container.inner_text()
                     
-                    # Only accept if we found actual session dates/times
-                    # (filter out navigation menu dates)
-                    if dates and times and len(dates) <= 10 and len(times) <= 20:
-                        sessions.append({"dates": dates, "times": times})
-                        modal_found = True
-            except:
-                pass
+                    # Must have minimum content
+                    if len(text) < 100:
+                        continue
+                    
+                    # Must contain our title
+                    if title.lower() not in text.lower():
+                        continue
+                    
+                    # Skip navigation/filter panels - they appear early in DOM
+                    # and always have these specific strings near the start
+                    text_start = text[:500]
+                    if "Clear All Filters" in text_start and "Cart" in text_start and "Filter" in text_start:
+                        continue
+                    
+                    # Extract dates and times
+                    dates, times = extract_dates_times(text)
+                    
+                    # Must have both dates AND times
+                    if dates and times:
+                        # Additional validation: reasonable number of entries
+                        if len(dates) <= 15 and len(times) <= 30:
+                            sessions.append({"dates": dates, "times": times})
+                            modal_found = True
+                            break
+                except:
+                    continue
         
         # Close modal
         try:
