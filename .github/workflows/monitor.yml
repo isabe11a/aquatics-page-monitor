@@ -1,0 +1,42 @@
+name: Calabasas Aquatics Monitor
+
+on:
+  on:
+  #schedule:
+  #  - cron: "0 14 * * *"   # ~7:00 AM PT most of the year, 6:00 AM in winter
+  schedule:
+    - cron: "*/5 * * * *"   # every 5 minutes (UTC)
+  workflow_dispatch:
+
+concurrency:
+  group: aquatics-monitor
+  cancel-in-progress: true
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install Playwright
+        run: |
+          python -m pip install -r requirements.txt
+          python -m playwright install --with-deps chromium
+
+      - name: Run monitor
+        run: python monitor.py
+
+      - name: Commit updated baseline
+        if: always()
+        run: |
+          git config user.name "${{ secrets.GIT_USER_NAME }}"
+          git config user.email "${{ secrets.GIT_USER_EMAIL }}"
+          git add baseline.json
+          git commit -m "Update baseline [skip ci]" || echo "No changes"
+          git push
