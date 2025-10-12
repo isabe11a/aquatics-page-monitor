@@ -162,17 +162,18 @@ def list_sessions_for_item(page, title):
         heading.click(timeout=3000)
         log("[DEBUG] Clicked successfully")
         
-        # Explicitly wait for a table with session data to appear
-        # This is more reliable than just waiting for time
-        try:
-            # Wait for either a table with DATES header or just any new table
-            page.wait_for_selector("table th:has-text('DATES'), table th:has-text('Dates'), table", timeout=8000, state="visible")
-            log("[DEBUG] Table appeared on page")
-        except Exception as e:
-            log(f"[DEBUG] Timeout waiting for table to appear: {e}")
+        # Wait for modal to animate and content to load
+        page.wait_for_timeout(3000)
         
-        # Give extra time for content to fully load
-        page.wait_for_timeout(2000)
+        # Wait for NEW tables to appear (more than the 2 that existed before)
+        try:
+            page.wait_for_function(
+                f"document.querySelectorAll('table').length > {tables_before}",
+                timeout=5000
+            )
+            log("[DEBUG] New table appeared on page")
+        except Exception as e:
+            log(f"[DEBUG] No new tables appeared: {e}")
         
         # Count tables after clicking
         tables_after = page.locator("table").count()
@@ -239,6 +240,9 @@ def list_sessions_for_item(page, title):
         if not modal_found:
             log(f"[DEBUG] Modal/table not found for {title}")
         
+        if not modal_found:
+            log(f"[DEBUG] Modal/table not found for {title}")
+        
         # Close the modal by pressing Escape or clicking X
         try:
             page.keyboard.press("Escape")
@@ -247,8 +251,8 @@ def list_sessions_for_item(page, title):
         except:
             # Try finding and clicking the X button
             try:
-                close_btn = page.locator('button:has-text("×"), button:has-text("X"), [class*="close"]').first
-                if close_btn.count() > 0 and close_btn.is_visible():
+                close_btn = page.locator('button:has-text("×"), button:has-text("X"), [class*="close"], [aria-label="Close"]').first
+                if close_btn.count() > 0:
                     close_btn.click()
                     page.wait_for_timeout(500)
                     log("[DEBUG] Closed modal with X button")
