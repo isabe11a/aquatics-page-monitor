@@ -103,7 +103,7 @@ def list_sessions_for_item(page, title):
     except Exception:
         pass
 
-    def parse_table_by_headers(tbl):
+def parse_table_by_headers(tbl):
     out = []
     # ensure rendered
     try:
