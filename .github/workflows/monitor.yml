@@ -38,14 +38,13 @@ jobs:
           set -o pipefail
           python monitor.py | tee report.txt
       
-      # Check if this is the 7am PT run (14:00 UTC, and within first 15 min window)
+      # Check if this is the 7am PT run (14:00 UTC hour - any time during the hour)
       - name: Check if daily report time
         id: check_time
         run: |
           current_hour=$(date -u +%H)
-          current_min=$(date -u +%M)
-          # Only send daily email during 14:00-14:14 UTC window (first run of the 7am hour)
-          if [ "$current_hour" == "14" ] && [ "$current_min" -lt "15" ]; then
+          # Send daily email during any run in the 14:00 UTC hour (7am PT hour)
+          if [ "$current_hour" == "14" ]; then
             echo "is_daily_time=true" >> $GITHUB_OUTPUT
           else
             echo "is_daily_time=false" >> $GITHUB_OUTPUT
