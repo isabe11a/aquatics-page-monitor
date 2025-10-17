@@ -38,14 +38,24 @@ jobs:
           set -o pipefail
           python monitor.py | tee report.txt
       
-      # Check if this is the 7am PT run (14:00 UTC hour - any time during the hour)
+      # Check if this is the 7am PT run and we haven't sent today's report yet
       - name: Check if daily report time
         id: check_time
         run: |
           current_hour=$(date -u +%H)
-          # Send daily email during any run in the 14:00 UTC hour (7am PT hour)
-          if [ "$current_hour" == "14" ]; then
+          current_date=$(date -u +%Y-%m-%d)
+          
+          # Check if we already sent a report today
+          if [ -f last_daily_report.txt ]; then
+            last_report_date=$(cat last_daily_report.txt)
+          else
+            last_report_date="never"
+          fi
+          
+          # Send daily email if it's the 7am hour AND we haven't sent today
+          if [ "$current_hour" == "14" ] && [ "$last_report_date" != "$current_date" ]; then
             echo "is_daily_time=true" >> $GITHUB_OUTPUT
+            echo "$current_date" > last_daily_report.txt
           else
             echo "is_daily_time=false" >> $GITHUB_OUTPUT
           fi
