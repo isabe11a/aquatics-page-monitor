@@ -67,8 +67,11 @@ jobs:
           git config user.name "${{ secrets.GIT_USER_NAME }}"
           git config user.email "${{ secrets.GIT_USER_EMAIL }}"
           git add baseline.json
-          git add last_daily_report.txt || true
-          git commit -m "Update baseline [skip ci]" || echo "No changes"
+          # Add tracker file if it was updated
+          if [ -f last_daily_report.txt ]; then
+            git add last_daily_report.txt
+          fi
+          git diff --quiet && git diff --staged --quiet || git commit -m "Update baseline [skip ci]"
           git push
       
       # Send email if: (1) changes detected OR (2) it's 7am daily report time
